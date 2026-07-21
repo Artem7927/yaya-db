@@ -5,8 +5,6 @@
 // ENV (Railway задаёт сам после Add → Database → Postgres):
 //   DATABASE_URL           — строка подключения к Postgres (обязательно)
 //   PORT                   — порт (Railway задаёт сам)
-//   TELEGRAM_BOT_TOKEN     — опционально: чтобы квитанция уходила в Telegram
-//   TELEGRAM_MANAGER_CHAT  — опционально: чат/группа, куда дублировать новые заказы
 
 const express = require('express');
 const { Pool } = require('pg');
@@ -102,19 +100,12 @@ app.post('/order', async (req, res) => {
   try {
     const body = req.body || {};
 
-    // Повторная отправка квитанции в Telegram — не создаём новый заказ
-    if (body.type === 'RECEIPT') {
-      await forwardReceipt(body);
-      return res.json({ ok: true });
-    }
-
     let num = body.order_num;
     if (!num) {
       const r = await pool.query("SELECT nextval('order_num_seq') AS num");
       num = Number(r.rows[0].num);
     }
     await pool.query('INSERT INTO orders (num, data) VALUES ($1, $2)', [num, body]);
-    await notifyNewOrder(num, body);
     res.json({ ok: true, num });
   } catch (e) { res.status(500).json({ ok: false, error: String(e) }); }
 });
@@ -141,34 +132,6 @@ app.post('/orders/:id/status', async (req, res) => {
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ ok: false, error: String(e) }); }
 });
-
-// ── Telegram (опционально) ──────────────────────────────────────────
-async function tg(method, payload) {
-  const token = process.env.TELEGRAM_BOT_TOKEN;
-  if (!token) return;
-  try {
-    await fetch(`https://api.telegram.org/bot${token}/${method}`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
-    });
-  } catch (e) { console.log('tg error', e.message); }
-}
-async function forwardReceipt(r) {
-  if (!r.chat_id) return;
-  const lines = (r.items || []).map(i => `• ${i.name} ×${i.qty} — ${i.total} тг`).join('\n');
-  await tg('sendMessage', { chat_id: r.chat_id,
-    text: `🧾 Квитанция №${r.num}\n${lines}\n\nИтого: ${r.total} тг\n📍 ${r.address || ''}` });
-}
-async function notifyNewOrder(num, o) {
-  if (o.chat_id) {
-    await tg('sendMessage', { chat_id: o.chat_id,
-      text: `✅ Заказ №${num} принят!\nСумма: ${(o.total || 0) + (o.delivery || 0)} тг\nМы уже готовим 🧑‍🍳` });
-  }
-  if (process.env.TELEGRAM_MANAGER_CHAT) {
-    const lines = (o.items || []).map(i => `• ${i.name} ×${i.qty}`).join('\n');
-    await tg('sendMessage', { chat_id: process.env.TELEGRAM_MANAGER_CHAT,
-      text: `🆕 Заказ №${num}\n${lines}\n📍 ${o.address || ''}\n💰 ${(o.total||0)+(o.delivery||0)} тг · ${o.pay_method||''}` });
-  }
-}
 
 app.get('/health', (req, res) => res.json({ ok: true }));
 
