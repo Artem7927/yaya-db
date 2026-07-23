@@ -33,6 +33,7 @@ const AUTH_ON = ADMIN_TOKEN.length > 0;
 // курьера и его привязка к заказу. Всё остальное — только кабинету.
 const PUBLIC_READ = new Set([
   'yaya_radio', 'yaya_tv', 'yaya_menu', 'yaya_stock',
+  'yaya_banners', 'yaya_promos',
   'yaya_courier_pos', 'yaya_order_couriers',
   'yaya_greetings', 'yaya_greet',
 ]);
