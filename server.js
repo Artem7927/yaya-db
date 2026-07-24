@@ -30,7 +30,20 @@ const app = express();
 app.set('trust proxy', 1);              // за прокси Railway — чтобы видеть реальный IP
 app.use(express.json({ limit: '2mb' }));
 
-const ADMIN_TOKEN = String(process.env.ADMIN_TOKEN || '').trim();
+// Читаем переменную окружения по нескольким возможным именам и в любом
+// регистре — чтобы COURIER_TOKEN / courier_token / Courier_Token и т.п.
+// все срабатывали. Railway различает регистр, а люди пишут по-разному.
+function envAny(names){
+  const want = names.map(n => n.toLowerCase());
+  for (const k of Object.keys(process.env)) {
+    if (want.includes(k.toLowerCase())) {
+      const v = String(process.env[k] || '').trim();
+      if (v) return v;
+    }
+  }
+  return '';
+}
+const ADMIN_TOKEN = envAny(['ADMIN_TOKEN', 'admin_token']);
 const AUTH_ON = ADMIN_TOKEN.length > 0;
 
 // ── Курьерский ключ ─────────────────────────────────────────────────
@@ -40,7 +53,7 @@ const AUTH_ON = ADMIN_TOKEN.length > 0;
 // кухни и чужие настройки курьерский ключ НЕ открывает.
 // Задаётся в Railway → Variables как COURIER_TOKEN. Если не задан —
 // роли курьера просто нет, всё работает как раньше.
-const COURIER_TOKEN = String(process.env.COURIER_TOKEN || '').trim();
+const COURIER_TOKEN = envAny(['COURIER_TOKEN', 'courier_token', 'COURIER_KEY', 'courier_key']);
 
 // Ключи /kv, которые курьер может читать И писать.
 const COURIER_KV = new Set(['yaya_order_couriers', 'yaya_courier_pos', 'yaya_couriers']);
