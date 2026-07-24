@@ -10,6 +10,11 @@
 //                    Задайте его в Railway → Variables и введите тот же ключ
 //                    в кабинете на экране входа — тогда чужие телефоны,
 //                    адреса и настройки закроются от посторонних.
+//   COURIER_TOKEN  — отдельный ключ для приложения курьера. Даёт только:
+//                    чтение своих заказов + ведение трёх служебных ключей
+//                    (yaya_order_couriers, yaya_courier_pos, yaya_couriers).
+//                    Меню, выручку и статусы кухни НЕ открывает. Курьер
+//                    вводит его один раз в своём приложении.
 
 const express = require('express');
 const { Pool } = require('pg');
@@ -28,13 +33,35 @@ app.use(express.json({ limit: '2mb' }));
 const ADMIN_TOKEN = String(process.env.ADMIN_TOKEN || '').trim();
 const AUTH_ON = ADMIN_TOKEN.length > 0;
 
+// ── Курьерский ключ ─────────────────────────────────────────────────
+// Отдельный ключ для приложения курьера. Даёт РОВНО столько, сколько
+// нужно курьеру: смотреть заказы (без правки) и вести три служебных
+// ключа (кто везёт, где курьер, список имён). Меню, выручку, статусы
+// кухни и чужие настройки курьерский ключ НЕ открывает.
+// Задаётся в Railway → Variables как COURIER_TOKEN. Если не задан —
+// роли курьера просто нет, всё работает как раньше.
+const COURIER_TOKEN = String(process.env.COURIER_TOKEN || '').trim();
+
+// Ключи /kv, которые курьер может читать И писать.
+const COURIER_KV = new Set(['yaya_order_couriers', 'yaya_courier_pos', 'yaya_couriers']);
+
+function isCourier(req) {
+  if (!COURIER_TOKEN) return false;
+  const t = req.get('X-Admin-Token') || req.get('X-Token') || req.query.token || '';
+  return String(t) === COURIER_TOKEN;
+}
+
 // ── Кто что может читать ────────────────────────────────────────────
-// Витрине нужны только эти ключи: меню, радио, ТВ, остатки, положение
-// курьера и его привязка к заказу. Всё остальное — только кабинету.
+// Витрине нужны только эти ключи: меню, радио, ТВ, остатки, баннеры,
+// акции и положение курьера на карте.
+// yaya_order_couriers СПЕЦИАЛЬНО убран из публичного чтения: там id
+// заказов и имена курьеров. Витрине он не нужен — статус доставки она
+// получает через /orders/status (только по своим номерам). Курьеру он
+// доступен по курьерскому ключу.
 const PUBLIC_READ = new Set([
   'yaya_radio', 'yaya_tv', 'yaya_menu', 'yaya_stock',
   'yaya_banners', 'yaya_promos',
-  'yaya_courier_pos', 'yaya_order_couriers',
+  'yaya_courier_pos',
   'yaya_greetings', 'yaya_greet',
 ]);
 // Сюда витрина может только ДОПИСЫВАТЬ (заявки на поздравления),
@@ -45,7 +72,7 @@ const PUBLIC_APPEND = new Set(['yaya_greet_req']);
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Content-Type,X-Admin-Token');
+  res.header('Access-Control-Allow-Headers', 'Content-Type,X-Admin-Token,X-Token,X-Courier-Name');
   if (req.method === 'OPTIONS') return res.sendStatus(204);
   next();
 });
@@ -95,6 +122,7 @@ async function initDb() {
     CREATE INDEX IF NOT EXISTS idx_orders_num     ON orders(num);
   `);
   console.log('DB ready · авторизация кабинета:', AUTH_ON ? 'ВКЛЮЧЕНА' : 'выключена (ADMIN_TOKEN не задан)');
+  console.log('Курьерский ключ:', COURIER_TOKEN ? 'ВКЛЮЧЁН' : 'не задан (COURIER_TOKEN нет)');
 }
 
 const revOf = (ts) => new Date(ts).getTime(); // ревизия = метка времени в мс
@@ -109,7 +137,8 @@ app.get('/auth-check', limit(20, 60000), (req, res) => {
 // GET  /kv/:key            → { ok, value, rev }
 app.get('/kv/:key', async (req, res) => {
   const key = req.params.key;
-  if (!PUBLIC_READ.has(key) && !isAdmin(req)) {
+  const courierOk = isCourier(req) && COURIER_KV.has(key);
+  if (!PUBLIC_READ.has(key) && !courierOk && !isAdmin(req)) {
     return res.status(401).json({ ok: false, error: 'Нужен ключ кабинета' });
   }
   try {
@@ -120,7 +149,11 @@ app.get('/kv/:key', async (req, res) => {
 });
 
 // PUT  /kv/:key   body=<любой JSON>   → { ok, rev }   (перезапись целиком)
-app.put('/kv/:key', needAdmin, async (req, res) => {
+app.put('/kv/:key', (req, res, next) => {
+  // Курьеру разрешаем запись только в его служебные ключи; всё прочее — админ.
+  if (isCourier(req) && COURIER_KV.has(req.params.key)) return next();
+  return needAdmin(req, res, next);
+}, async (req, res) => {
   try {
     const { rows } = await pool.query(
       `INSERT INTO kv (k, v, updated_at) VALUES ($1, $2, now())
@@ -223,8 +256,15 @@ app.get('/orders/status', limit(120, 60000), async (req, res) => {
   } catch (e) { res.status(500).json({ ok: false, error: String(e) }); }
 });
 
-// GET /orders?since=<ISO>&limit=  → полный список для кабинета (Кухня/Менеджер)
-app.get('/orders', needAdmin, async (req, res) => {
+// GET /orders?since=<ISO>&limit=  → список заказов.
+// Кабинет видит все. Курьер — только назначенные лично на него
+// (по привязке в yaya_order_couriers), чтобы чужие адреса и телефоны
+// не утекали в курьерское приложение.
+app.get('/orders', (req, res, next) => {
+  if (isAdmin(req)) { req._role = 'admin'; return next(); }
+  if (isCourier(req)) { req._role = 'courier'; return next(); }
+  return res.status(401).json({ ok: false, error: 'Нужен ключ' });
+}, async (req, res) => {
   try {
     const limitN = Math.min(Number(req.query.limit) || 100, 500);
     const { rows } = await pool.query(
@@ -234,7 +274,34 @@ app.get('/orders', needAdmin, async (req, res) => {
         ORDER BY created_at DESC LIMIT $2`,
       [req.query.since || null, limitN]
     );
-    res.json({ ok: true, orders: rows });
+
+    if (req._role === 'admin') return res.json({ ok: true, orders: rows });
+
+    // Курьер: подмешиваем привязку и оставляем только свои заказы.
+    let cour = {};
+    try {
+      const k = await pool.query('SELECT v FROM kv WHERE k=$1', ['yaya_order_couriers']);
+      if (k.rows.length && k.rows[0].v && typeof k.rows[0].v === 'object') cour = k.rows[0].v;
+    } catch (e) {}
+    const norm = s => String(s == null ? '' : s).trim().toLowerCase().replace(/ё/g, 'е').replace(/\s+/g, ' ');
+    const dec = s => { try { return decodeURIComponent(s); } catch (e) { return s; } };
+    const me = norm(dec(req.get('X-Courier-Name') || '') || req.query.me || '');
+
+    const out = [];
+    for (const o of rows) {
+      const c = cour[o.id] || cour[String(o.id)] || {};
+      // если имя курьера не передано — отдаём все привязанные хоть на кого-то,
+      // но приложение всё равно отфильтрует по себе; если передано — режем на сервере.
+      if (me && norm(c.courier) !== me) continue;
+      out.push({
+        id: o.id, num: o.num, status: o.status,
+        delivery_status: c.delivery_status || 'pending',
+        courier: c.courier || '',
+        ts: o.ts,
+        data: o.data,
+      });
+    }
+    res.json({ ok: true, orders: out });
   } catch (e) { res.status(500).json({ ok: false, error: String(e) }); }
 });
 
