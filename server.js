@@ -127,10 +127,13 @@ async function initDb() {
 
 const revOf = (ts) => new Date(ts).getTime(); // ревизия = метка времени в мс
 
-// ── Проверка ключа (кабинет спрашивает при входе) ───────────────────
-// { ok } — ключ подошёл; { auth:false } — на сервере ключ вообще не задан.
+// ── Проверка ключа (кабинет и курьер спрашивают при входе) ──────────
+// { ok, role } — ключ подошёл (role: 'admin' | 'courier');
+// { ok:false } — ключ не подошёл; { auth:false } — на сервере ключа нет.
 app.get('/auth-check', limit(20, 60000), (req, res) => {
-  res.json({ ok: isAdmin(req), auth: AUTH_ON });
+  if (isAdmin(req))   return res.json({ ok: true, role: 'admin',   auth: AUTH_ON });
+  if (isCourier(req)) return res.json({ ok: true, role: 'courier', auth: AUTH_ON, courier: true });
+  res.json({ ok: false, auth: AUTH_ON, courier: COURIER_TOKEN.length > 0 });
 });
 
 // ── KEY-VALUE (те же ключи, что были в localStorage) ────────────────
