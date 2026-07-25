@@ -18,6 +18,7 @@
 
 const express = require('express');
 const { Pool } = require('pg');
+const webpush = require('web-push');
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -29,6 +30,39 @@ const pool = new Pool({
 const app = express();
 app.set('trust proxy', 1);              // за прокси Railway — чтобы видеть реальный IP
 app.use(express.json({ limit: '2mb' }));
+
+// ── Web Push (VAPID) ─────────────────────────────────────────────────
+const VAPID_PUBLIC  = process.env.VAPID_PUBLIC  || '';
+const VAPID_PRIVATE = process.env.VAPID_PRIVATE || '';
+const VAPID_SUBJECT = process.env.VAPID_SUBJECT || 'mailto:admin@example.com';
+const PUSH_ON = !!(VAPID_PUBLIC && VAPID_PRIVATE);
+if (PUSH_ON) { try { webpush.setVapidDetails(VAPID_SUBJECT, VAPID_PUBLIC, VAPID_PRIVATE); } catch (e) { console.error('VAPID init error:', e); } }
+
+async function loadSubs() {
+  try {
+    const r = await pool.query('SELECT v FROM kv WHERE k=$1', ['yaya_push_subs']);
+    if (r.rows.length && r.rows[0].v && typeof r.rows[0].v === 'object') return r.rows[0].v;
+  } catch (e) {}
+  return { admin: [], couriers: {}, orders: {} };
+}
+async function saveSubs(s) {
+  try {
+    await pool.query(
+      `INSERT INTO kv (k, v, updated_at) VALUES ($1, $2::jsonb, now())
+       ON CONFLICT (k) DO UPDATE SET v = $2::jsonb, updated_at = now()`,
+      ['yaya_push_subs', JSON.stringify(s)]);
+  } catch (e) {}
+}
+function dedupeSubs(arr) {
+  const seen = new Set();
+  return (arr || []).filter(s => s && s.endpoint && !seen.has(s.endpoint) && seen.add(s.endpoint));
+}
+async function sendPush(subs, payload) {
+  if (!PUSH_ON || !Array.isArray(subs) || !subs.length) return;
+  await Promise.all(subs.map(sub =>
+    webpush.sendNotification(sub, JSON.stringify(payload)).catch(() => {})
+  ));
+}
 
 // Читаем переменную окружения по нескольким возможным именам и в любом
 // регистре — чтобы COURIER_TOKEN / courier_token / Courier_Token и т.п.
@@ -229,6 +263,18 @@ app.post('/order', limit(20, 60000), async (req, res) => {
     }
     await pool.query('INSERT INTO orders (num, data) VALUES ($1, $2)', [num, body]);
     res.json({ ok: true, num });
+    if (body.type !== 'RECEIPT') {
+      try {
+        const store = await loadSubs();
+        const total = (Number(body.total) || 0) + (Number(body.delivery) || 0);
+        const addr = String(body.address || '').trim();
+        sendPush(store.admin, {
+          title: 'Новый заказ #' + num,
+          body: (total ? total.toLocaleString('ru') + ' тг' : '') + (addr ? ' · ' + addr : ' · Самовывоз'),
+          tag: 'order-' + num, url: './'
+        });
+      } catch (e) {}
+    }
   } catch (e) { res.status(500).json({ ok: false, error: String(e) }); }
 });
 
@@ -326,10 +372,61 @@ app.post('/orders/:id/status', needAdmin, async (req, res) => {
   try {
     await pool.query('UPDATE orders SET status=$1 WHERE id=$2', [req.body.status, req.params.id]);
     res.json({ ok: true });
+    try {
+      const q = await pool.query('SELECT num FROM orders WHERE id=$1', [req.params.id]);
+      const num = q.rows[0] && q.rows[0].num;
+      if (num) {
+        const st = req.body.status;
+        const label = st === 'cook' ? 'Ваш заказ готовится' : st === 'done' ? 'Заказ готов' : st === 'cancel' ? 'Заказ отменён' : 'Статус заказа обновлён';
+        const store = await loadSubs();
+        sendPush((store.orders || {})[String(num)], { title: 'Заказ #' + num, body: label, tag: 'order-' + num, url: './' });
+      }
+    } catch (e) {}
   } catch (e) { res.status(500).json({ ok: false, error: String(e) }); }
 });
 
-app.get('/health', (req, res) => res.json({ ok: true, auth: AUTH_ON }));
+app.get('/push/public-key', (req, res) => res.json({ ok: true, key: VAPID_PUBLIC }));
+
+app.post('/push/subscribe', async (req, res) => {
+  try {
+    const { role, name, num, sub } = req.body || {};
+    if (!sub || !sub.endpoint) return res.status(400).json({ ok: false, error: 'нет подписки' });
+    if (role === 'admin'   && !isAdmin(req))                    return res.status(401).json({ ok: false });
+    if (role === 'courier' && !(isAdmin(req) || isCourier(req))) return res.status(401).json({ ok: false });
+    const store = await loadSubs();
+    if (role === 'admin') {
+      store.admin = dedupeSubs([...(store.admin || []), sub]);
+    } else if (role === 'courier' && name) {
+      const key = String(name).trim().toLowerCase();
+      store.couriers = store.couriers || {};
+      store.couriers[key] = dedupeSubs([...(store.couriers[key] || []), sub]);
+    } else if (role === 'client' && num) {
+      store.orders = store.orders || {};
+      store.orders[String(num)] = dedupeSubs([...(store.orders[String(num)] || []), sub]);
+    } else {
+      return res.status(400).json({ ok: false, error: 'неверная роль' });
+    }
+    await saveSubs(store);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ ok: false, error: String(e) }); }
+});
+
+app.post('/push/notify-courier', needAdmin, async (req, res) => {
+  try {
+    const { name, num } = req.body || {};
+    if (!name) return res.status(400).json({ ok: false });
+    const store = await loadSubs();
+    const key = String(name).trim().toLowerCase();
+    sendPush((store.couriers || {})[key], {
+      title: 'Новый заказ на доставку',
+      body: num ? ('Заказ #' + num + ' назначен на вас') : 'Вам назначен заказ',
+      tag: 'assign', url: './'
+    });
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ ok: false, error: String(e) }); }
+});
+
+app.get('/health', (req, res) => res.json({ ok: true, auth: AUTH_ON, push: PUSH_ON }));
 
 const PORT = process.env.PORT || 3000;
 initDb()
