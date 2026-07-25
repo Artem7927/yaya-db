@@ -276,10 +276,12 @@ app.post('/order', limit(20, 60000), async (req, res) => {
         const store = await loadSubs();
         const total = (Number(body.total) || 0) + (Number(body.delivery) || 0);
         const addr = String(body.address || '').trim();
+        let newCount = 0;
+        try { const bc = await pool.query("SELECT count(*)::int AS n FROM orders WHERE status='new'"); newCount = bc.rows[0].n; } catch (e) {}
         sendPush(store.admin, {
           title: 'Новый заказ #' + num,
           body: (total ? total.toLocaleString('ru') + ' тг' : '') + (addr ? ' · ' + addr : ' · Самовывоз'),
-          tag: 'order-' + num, url: './'
+          tag: 'order-' + num, url: './', count: newCount
         });
       } catch (e) {}
     }
