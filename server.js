@@ -34,9 +34,17 @@ app.use(express.json({ limit: '2mb' }));
 // ── Web Push (VAPID) ─────────────────────────────────────────────────
 const VAPID_PUBLIC  = process.env.VAPID_PUBLIC  || '';
 const VAPID_PRIVATE = process.env.VAPID_PRIVATE || '';
-const VAPID_SUBJECT = process.env.VAPID_SUBJECT || 'mailto:admin@example.com';
-const PUSH_ON = !!(VAPID_PUBLIC && VAPID_PRIVATE);
-if (PUSH_ON) { try { webpush.setVapidDetails(VAPID_SUBJECT, VAPID_PUBLIC, VAPID_PRIVATE); } catch (e) { console.error('VAPID init error:', e); } }
+let   VAPID_SUBJECT = process.env.VAPID_SUBJECT || 'mailto:admin@example.com';
+// subject ОБЯЗАН начинаться с mailto: или http(s): — иначе setVapidDetails падает
+// и ВСЕ отправки молча проваливаются. Нормализуем на случай кривого ввода.
+if (!/^(mailto:|https?:)/i.test(VAPID_SUBJECT)) {
+  VAPID_SUBJECT = 'mailto:' + String(VAPID_SUBJECT).replace(/^mailto:/i, '').trim();
+}
+let PUSH_ON = false;
+if (VAPID_PUBLIC && VAPID_PRIVATE) {
+  try { webpush.setVapidDetails(VAPID_SUBJECT, VAPID_PUBLIC, VAPID_PRIVATE); PUSH_ON = true; }
+  catch (e) { console.error('VAPID init error:', e); PUSH_ON = false; }
+}
 
 async function loadSubs() {
   try {
@@ -426,6 +434,22 @@ app.post('/push/notify-courier', needAdmin, async (req, res) => {
   } catch (e) { res.status(500).json({ ok: false, error: String(e) }); }
 });
 
+app.get('/push/status', async (req, res) => {
+  try {
+    const st = await loadSubs();
+    const cour = st.couriers || {}; let courN = 0; for (const k in cour) courN += (cour[k] || []).length;
+    const ord = st.orders || {};   let ordN  = 0; for (const k in ord)  ordN  += (ord[k]  || []).length;
+    res.json({ ok: true, push: PUSH_ON, subject: VAPID_SUBJECT, admin: (st.admin || []).length, couriers: courN, orders: ordN });
+  } catch (e) { res.status(500).json({ ok: false, error: String(e) }); }
+});
+app.post('/push/test', needAdmin, async (req, res) => {
+  try {
+    const st = await loadSubs();
+    const n = (st.admin || []).length;
+    await sendPush(st.admin, { title: 'Проверка уведомлений', body: 'Если вы это видите — пуш работает', tag: 'test', url: './' });
+    res.json({ ok: true, sent: n, push: PUSH_ON });
+  } catch (e) { res.status(500).json({ ok: false, error: String(e) }); }
+});
 app.get('/health', (req, res) => res.json({ ok: true, auth: AUTH_ON, push: PUSH_ON }));
 
 const PORT = process.env.PORT || 3000;
