@@ -76,7 +76,10 @@ async function sendPush(subs, payload) {
 // yaya_order_couriers ({ [id заказа]: {courier, delivery_status} }), а не в
 // orders.status, поэтому обычный /orders/:id/status их не ловит. Сравниваем
 // прежнее и новое состояние ключа и шлём пуш по номеру заказа.
-const DST_PUSH = { assigned: 'Заказ передан курьеру', on_way: 'Курьер в пути', delivered: 'Заказ доставлен' };
+// ВАЖНО: 'assigned' (назначение курьера) клиенту НЕ шлём — это внутренний шаг,
+// курьер лишь заранее видит маршрут, пока заказ ещё готовится. Реальная выдача —
+// когда курьер сам берёт заказ ('on_way').
+const DST_PUSH = { on_way: 'Курьер в пути', delivered: 'Заказ доставлен' };
 async function notifyDeliveryChanges(prev, next) {
   try {
     prev = prev || {}; next = next || {};
