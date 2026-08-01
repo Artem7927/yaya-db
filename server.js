@@ -72,6 +72,35 @@ async function sendPush(subs, payload) {
   ));
 }
 
+// Пуш клиенту при смене статуса ДОСТАВКИ. Эти статусы живут в KV
+// yaya_order_couriers ({ [id заказа]: {courier, delivery_status} }), а не в
+// orders.status, поэтому обычный /orders/:id/status их не ловит. Сравниваем
+// прежнее и новое состояние ключа и шлём пуш по номеру заказа.
+const DST_PUSH = { assigned: 'Заказ передан курьеру', on_way: 'Курьер в пути', delivered: 'Заказ доставлен' };
+async function notifyDeliveryChanges(prev, next) {
+  try {
+    prev = prev || {}; next = next || {};
+    const changed = [];
+    for (const id in next) {
+      const nd = next[id] && next[id].delivery_status;
+      const od = prev[id] && prev[id].delivery_status;
+      if (nd && nd !== od && DST_PUSH[nd]) changed.push({ id, ds: nd });
+    }
+    if (!changed.length) return;
+    const store = await loadSubs();
+    for (const ch of changed) {
+      try {
+        const q = await pool.query('SELECT num FROM orders WHERE id=$1', [ch.id]);
+        const num = q.rows[0] && q.rows[0].num;
+        if (!num) continue;
+        sendPush((store.orders || {})[String(num)], {
+          title: 'Заказ #' + num, body: DST_PUSH[ch.ds], tag: 'order-' + num, url: './'
+        });
+      } catch (e) {}
+    }
+  } catch (e) {}
+}
+
 // Читаем переменную окружения по нескольким возможным именам и в любом
 // регистре — чтобы COURIER_TOKEN / courier_token / Courier_Token и т.п.
 // все срабатывали. Railway различает регистр, а люди пишут по-разному.
@@ -213,6 +242,16 @@ app.put('/kv/:key', (req, res, next) => {
   return needAdmin(req, res, next);
 }, async (req, res) => {
   try {
+    // Для привязки курьеров запоминаем прежнее состояние — чтобы после записи
+    // понять, у каких заказов сменился статус доставки, и уведомить клиента.
+    let prevCour = null;
+    if (req.params.key === 'yaya_order_couriers') {
+      try {
+        const p = await pool.query('SELECT v FROM kv WHERE k=$1', ['yaya_order_couriers']);
+        if (p.rows.length && p.rows[0].v && typeof p.rows[0].v === 'object') prevCour = p.rows[0].v;
+      } catch (e) {}
+    }
+
     const { rows } = await pool.query(
       `INSERT INTO kv (k, v, updated_at) VALUES ($1, $2, now())
        ON CONFLICT (k) DO UPDATE SET v=$2, updated_at=now()
@@ -220,6 +259,11 @@ app.put('/kv/:key', (req, res, next) => {
       [req.params.key, req.body]
     );
     res.json({ ok: true, rev: revOf(rows[0].updated_at) });
+
+    // Пуш клиенту при смене статуса доставки (передан курьеру / в пути / доставлен).
+    if (req.params.key === 'yaya_order_couriers') {
+      notifyDeliveryChanges(prevCour, req.body).catch(() => {});
+    }
   } catch (e) { res.status(500).json({ ok: false, error: String(e) }); }
 });
 
