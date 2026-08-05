@@ -902,9 +902,13 @@ app.get('/orders', async (req, res) => {
 // sign>0 — списать (done), sign<0 — вернуть (cancel)
 async function applyTechCard(tc, items, sign, client) {
   const ded = [];
+  const missing = [];
   for (const ci of items || []) {
-    const recipe = tc[ci.id];
-    if (!recipe) continue;
+    const recipe = ci && ci.id ? tc[ci.id] : null;
+    if (!recipe) {
+      missing.push({ id: (ci && ci.id) || null, name: (ci && ci.name) || '', qty: (ci && ci.qty) || 1 });
+      continue;
+    }
     for (const r of recipe) {
       const need = Number((Number(r.qty) * (Number(ci.qty) || 1)).toFixed(4));
       if (!(need > 0)) continue;
@@ -924,7 +928,7 @@ async function applyTechCard(tc, items, sign, client) {
       }
     }
   }
-  return ded;
+  return { ded, missing };
 }
 async function insertDeductions(client, ded) {
   for (const d of ded) {
@@ -955,16 +959,23 @@ app.post('/orders/:id/status', requireRole('MANAGER', 'SUPERVISOR', 'ASSEMBLER')
       } else if (status === 'done') {
         if (!ord.deducted) {
           const tc = (await kvGet('yaya_tech_v3', client)) || {};
-          const ded = await applyTechCard(tc, (ord.data && ord.data.items) || [], 1, client);
+          const { ded, missing } = await applyTechCard(tc, (ord.data && ord.data.items) || [], 1, client);
           await insertDeductions(client, ded);
           await client.query('UPDATE orders SET status=$1, deducted=true WHERE id=$2', ['done', id]);
+          if (missing && missing.length) {
+            await client.query("UPDATE orders SET data=jsonb_set(data,'{deduct_partial}','true',true) WHERE id=$1", [id]);
+            console.warn('[deduct] order=' + ord.num + ' uncovered=' + missing.map(m => (m.id || 'no-id') + ' / ' + (m.name || '?') + ' x' + m.qty).join(', '));
+          }
         } else {
           await client.query('UPDATE orders SET status=$1 WHERE id=$2', ['done', id]);
         }
       } else if (status === 'cancel') {
         if (ord.deducted) {
           const tc = (await kvGet('yaya_tech_v3', client)) || {};
-          const ded = await applyTechCard(tc, (ord.data && ord.data.items) || [], -1, client);
+          const { ded, missing } = await applyTechCard(tc, (ord.data && ord.data.items) || [], -1, client);
+          if (missing && missing.length) {
+            console.warn('[deduct] order=' + ord.num + ' restore-uncovered=' + missing.map(m => (m.id || 'no-id') + ' / ' + (m.name || '?') + ' x' + m.qty).join(', '));
+          }
           await insertDeductions(client, ded);
           await client.query('UPDATE orders SET status=$1, deducted=false WHERE id=$2', ['cancel', id]);
         } else {
