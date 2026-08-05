@@ -65,7 +65,8 @@ function dedupeSubs(arr) {
 async function sendPush(subs, payload) {
   if (!PUSH_ON || !Array.isArray(subs) || !subs.length) return;
   await Promise.all(subs.map(sub =>
-    webpush.sendNotification(sub, JSON.stringify(payload)).catch(() => {})
+    webpush.sendNotification(sub, JSON.stringify(payload))
+      .catch(err => console.error('[push]', err.statusCode, sub?.endpoint?.slice(-16), err.body))
   ));
 }
 const DST_PUSH = { on_way: 'Курьер в пути', delivered: 'Заказ доставлен' };
@@ -124,7 +125,7 @@ const ROLE_ENV = {
 };
 
 function tokenOf(req) {
-  return req.get('X-Token') || req.get('X-Admin-Token') || req.query.token || '';
+  return req.get('X-Admin-Token') || req.get('X-Token') || req.query.token || '';
 }
 
 async function roleOf(req) {
@@ -146,7 +147,11 @@ function requireRole(...roles) {
     try {
       const role = await roleOf(req);
       if (!role) return res.status(401).json({ ok: false, error: 'Нужен ключ' });
-      if (!roles.includes(role)) return res.status(403).json({ ok: false, error: 'Доступ запрещён для роли ' + role });
+      if (!roles.includes(role)) {
+        const tail = String(tokenOf(req) || '').slice(-6);
+        console.error('[auth] 403', req.method, req.path, 'role=' + role, 'token=…' + tail);
+        return res.status(403).json({ ok: false, error: 'Доступ запрещён для роли ' + role });
+      }
       req.role = role;
       next();
     } catch (e) { res.status(500).json({ ok: false, error: String(e) }); }
