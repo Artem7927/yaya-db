@@ -904,28 +904,23 @@ async function applyTechCard(tc, items, sign, client) {
   const ded = [];
   for (const ci of items || []) {
     const recipe = tc[ci.id];
-    console.log('[TEMP LOG] applyTechCard item=' + ci.id + ' qty=' + (ci.qty || 1) + ' recipeFound=' + (!!recipe) + ' recipeRows=' + (recipe ? recipe.length : 0)); // TEMP LOG
     if (!recipe) continue;
     for (const r of recipe) {
       const need = Number((Number(r.qty) * (Number(ci.qty) || 1)).toFixed(4));
-      if (!(need > 0)) { console.log('[TEMP LOG] applyTechCard ing=' + r.ingId + ' need=' + need + ' SKIP (need<=0)'); continue; }
+      if (!(need > 0)) continue;
       const delta = sign > 0 ? -need : need;
       const pf = (await client.query('SELECT * FROM pf_stock WHERE id=$1 FOR UPDATE', [r.ingId])).rows[0];
       if (pf) {
-        const u = await client.query('UPDATE pf_stock SET qty=GREATEST(0,qty+$1), updated_at=now() WHERE id=$2', [delta, r.ingId]);
-        console.log('[TEMP LOG] applyTechCard ing=' + r.ingId + ' table=pf_stock need=' + need + ' delta=' + delta + ' rowCount=' + u.rowCount); // TEMP LOG
+        await client.query('UPDATE pf_stock SET qty=GREATEST(0,qty+$1), updated_at=now() WHERE id=$2', [delta, r.ingId]);
         ded.push({ ing: pf.name, qty: (sign > 0 ? '-' : '+') + need, unit: r.unit,
           reason: sign > 0 ? 'Автосписание по заказу' : 'Возврат по отмене', emp: 'Система' });
         continue;
       }
       const st = (await client.query('SELECT * FROM stock WHERE id=$1 FOR UPDATE', [r.ingId])).rows[0];
       if (st) {
-        const u = await client.query('UPDATE stock SET qty=GREATEST(0,qty+$1), updated_at=now() WHERE id=$2', [delta, r.ingId]);
-        console.log('[TEMP LOG] applyTechCard ing=' + r.ingId + ' table=stock need=' + need + ' delta=' + delta + ' rowCount=' + u.rowCount); // TEMP LOG
+        await client.query('UPDATE stock SET qty=GREATEST(0,qty+$1), updated_at=now() WHERE id=$2', [delta, r.ingId]);
         ded.push({ ing: st.name, qty: (sign > 0 ? '-' : '+') + need, unit: r.unit,
           reason: sign > 0 ? 'Автосписание по заказу' : 'Возврат по отмене', emp: 'Система' });
-      } else {
-        console.log('[TEMP LOG] applyTechCard ing=' + r.ingId + ' need=' + need + ' table=NONE (нет строки ни в pf_stock, ни в stock)'); // TEMP LOG
       }
     }
   }
@@ -955,33 +950,25 @@ app.post('/orders/:id/status', requireRole('MANAGER', 'SUPERVISOR', 'ASSEMBLER')
       await client.query('BEGIN');
       const ord = (await client.query('SELECT * FROM orders WHERE id=$1 FOR UPDATE', [id])).rows[0];
       if (!ord) { await client.query('ROLLBACK'); client.release(); return res.status(404).json({ ok: false, error: 'Заказ не найден' }); }
-      console.log('[TEMP LOG] status route id=' + id + ' num=' + ord.num + ' status=' + status + ' deducted_before=' + ord.deducted + ' items=' + JSON.stringify((ord.data && ord.data.items) || [])); // TEMP LOG
       if (status === 'cook') {
         await client.query('UPDATE orders SET status=$1, accepted_at=COALESCE(accepted_at,now()) WHERE id=$2', ['cook', id]);
-        console.log('[TEMP LOG] status committed branch=cook num=' + ord.num + ' status_after=cook deducted_after=' + ord.deducted); // TEMP LOG
       } else if (status === 'done') {
         if (!ord.deducted) {
-          console.log('[TEMP LOG] status branch=deduct (done, was NOT deducted) num=' + ord.num); // TEMP LOG
           const tc = (await kvGet('yaya_tech_v3', client)) || {};
           const ded = await applyTechCard(tc, (ord.data && ord.data.items) || [], 1, client);
           await insertDeductions(client, ded);
           await client.query('UPDATE orders SET status=$1, deducted=true WHERE id=$2', ['done', id]);
-          console.log('[TEMP LOG] status committed branch=deduct num=' + ord.num + ' status_after=done deducted_after=true deductions_rows=' + ded.length); // TEMP LOG
         } else {
           await client.query('UPDATE orders SET status=$1 WHERE id=$2', ['done', id]);
-          console.log('[TEMP LOG] status committed branch=else num=' + ord.num + ' status_after=done deducted_after=' + ord.deducted + ' (already deducted, skip)'); // TEMP LOG
         }
       } else if (status === 'cancel') {
         if (ord.deducted) {
-          console.log('[TEMP LOG] status branch=restore (cancel, was deducted) num=' + ord.num); // TEMP LOG
           const tc = (await kvGet('yaya_tech_v3', client)) || {};
           const ded = await applyTechCard(tc, (ord.data && ord.data.items) || [], -1, client);
           await insertDeductions(client, ded);
           await client.query('UPDATE orders SET status=$1, deducted=false WHERE id=$2', ['cancel', id]);
-          console.log('[TEMP LOG] status committed branch=restore num=' + ord.num + ' status_after=cancel deducted_after=false deductions_rows=' + ded.length); // TEMP LOG
         } else {
           await client.query('UPDATE orders SET status=$1 WHERE id=$2', ['cancel', id]);
-          console.log('[TEMP LOG] status committed branch=else num=' + ord.num + ' status_after=cancel deducted_after=' + ord.deducted + ' (not deducted, skip)'); // TEMP LOG
         }
       }
       await client.query('COMMIT');
@@ -1009,7 +996,6 @@ app.post('/orders/:id/fulfill', requireRole('MANAGER', 'SUPERVISOR', 'ASSEMBLER'
     }
     const ord = (await pool.query('SELECT * FROM orders WHERE id=$1', [id])).rows[0];
     if (!ord) return res.status(404).json({ ok: false, error: 'Заказ не найден' });
-    console.log('[TEMP LOG] fulfill id=' + id + ' num=' + ord.num + ' mode=' + mode + ' status=' + ord.status + ' deducted=' + ord.deducted + ' items=' + JSON.stringify((ord.data && ord.data.items) || [])); // TEMP LOG
     if (mode === 'courier') {
       const cur = (await kvGet('yaya_order_couriers')) || {};
       const prev = JSON.parse(JSON.stringify(cur));
