@@ -629,6 +629,30 @@ app.get('/pf-stock', requireAnyRole, async (req, res) => {
   } catch (e) { res.status(500).json({ ok: false, error: String(e) }); }
 });
 
+// PATCH /pf-stock/:id — установить точный остаток ПФ (Пересчёт)
+// body: { qty }
+app.patch('/pf-stock/:id', requireRole('MANAGER', 'WORKSHOP', 'KITCHEN'), async (req, res) => {
+  try {
+    const id = req.params.id;
+    const b = req.body || {};
+    const newQty = Number(b.qty);
+    if (!Number.isFinite(newQty) || newQty < 0) return res.status(400).json({ ok: false, error: 'Нужно qty >= 0' });
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const it = (await client.query('SELECT * FROM pf_stock WHERE id=$1 FOR UPDATE', [id])).rows[0];
+      if (!it) { await client.query('ROLLBACK'); client.release(); return res.status(404).json({ ok: false, error: 'Позиция не найдена' }); }
+      const delta = newQty - Number(it.qty);
+      await client.query('UPDATE pf_stock SET qty=$1, updated_at=now() WHERE id=$2', [newQty, id]);
+      await client.query('INSERT INTO deductions (ing, qty, unit, reason, emp) VALUES ($1,$2,$3,$4,$5)',
+        [it.name, (delta >= 0 ? '+' : '') + Number(delta.toFixed(4)), it.unit, 'Инвентаризация ПФ', b.emp || req.role]);
+      await client.query('COMMIT');
+      client.release();
+      res.json({ ok: true, item: { id: it.id, name: it.name, qty: newQty, unit: it.unit, min: rowToNum(it.min) } });
+    } catch (e) { await client.query('ROLLBACK'); client.release(); throw e; }
+  } catch (e) { res.status(500).json({ ok: false, error: String(e) }); }
+});
+
 // ── ЖУРНАЛЫ (append + чтение) ────────────────────────────────────────
 const JOURNAL_INS = {
   deductions:  'INSERT INTO deductions (ing, qty, unit, reason, emp) VALUES ($1,$2,$3,$4,$5)',
@@ -1023,6 +1047,44 @@ app.post('/orders/:id/fulfill', requireRole('MANAGER', 'SUPERVISOR', 'ASSEMBLER'
       const label = mode === 'courier' ? 'Передан курьеру' : (mode === 'pickup' ? 'Готов к самовывозу' : 'Выдан в кафе');
       sendPush((store.orders || {})[String(num)], { title: 'Заказ #' + num, body: label, tag: 'order-' + num, url: './' });
     } catch (e) {}
+  } catch (e) { res.status(500).json({ ok: false, error: String(e) }); }
+});
+
+// POST /admin/reset-orders — очистка тестовых заказов (только MANAGER)
+// body: { confirm: true, confirm_phrase: "DELETE ALL ORDERS", start_num: 1 }
+// Удаляет: заказы и журнал списаний. Перед очисткой делает бэкап в KV
+// yaya_orders_backup_<timestamp>. Журналы цеха/кухни и push-подписки админа/курьеров не трогает.
+app.post('/admin/reset-orders', requireRole('MANAGER'), limit(3, 60000), async (req, res) => {
+  try {
+    const b = req.body || {};
+    if (b.confirm !== true || b.confirm_phrase !== 'DELETE ALL ORDERS') {
+      return res.status(400).json({ ok: false, error: 'Нужно { confirm: true, confirm_phrase: "DELETE ALL ORDERS" }' });
+    }
+    const startNum = Number(b.start_num);
+    if (!Number.isInteger(startNum) || startNum < 1) return res.status(400).json({ ok: false, error: 'start_num >= 1' });
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const before = (await client.query(
+        `SELECT (SELECT count(*)::int FROM orders) AS orders,
+                (SELECT count(*)::int FROM deductions) AS deductions`)).rows[0];
+      const backup = {
+        made_at: new Date().toISOString(),
+        orders: (await client.query('SELECT * FROM orders ORDER BY id')).rows,
+        deductions: (await client.query('SELECT * FROM deductions ORDER BY id')).rows,
+      };
+      const backupKey = 'yaya_orders_backup_' + Date.now();
+      await kvSet(backupKey, backup, client);
+      await client.query('TRUNCATE orders, deductions RESTART IDENTITY');
+      await client.query("SELECT setval('order_num_seq', $1::bigint, false)", [startNum]);
+      await client.query("DELETE FROM kv WHERE k='yaya_order_couriers'");
+      await client.query('COMMIT');
+      client.release();
+      const store = await loadSubs();
+      store.orders = {};
+      await saveSubs(store);
+      res.json({ ok: true, cleared: { orders: before.orders, deductions: before.deductions }, backup_key: backupKey, next_num: startNum });
+    } catch (e) { await client.query('ROLLBACK'); client.release(); throw e; }
   } catch (e) { res.status(500).json({ ok: false, error: String(e) }); }
 });
 
