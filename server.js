@@ -214,9 +214,9 @@ async function seedIfEmpty(client) {
   if (!pf && DEFAULT_WS_STOCK.length) {
     for (const i of DEFAULT_WS_STOCK) {
       await client.query(
-        `INSERT INTO pf_stock (id,name,qty,unit,min) VALUES ($1,$2,$3,$4,$5)
-         ON CONFLICT (id) DO NOTHING`,
-        [i.id, i.name, i.qty, i.unit, i.min || 0]);
+        `INSERT INTO pf_stock (id,name,qty,unit,min,location) VALUES ($1,$2,$3,$4,$5,$6)
+         ON CONFLICT (id, location) DO NOTHING`,
+        [i.id, i.name, i.qty, i.unit, i.min || 0, 'workshop']);
     }
   }
   if ((await kvGet('yaya_tech_v3', client)) == null) {
@@ -235,6 +235,55 @@ async function seedIfEmpty(client) {
     await client.query(
       `INSERT INTO access_keys (role, token) VALUES ($1, $2)
        ON CONFLICT (role) DO NOTHING`, [role, tok]);
+  }
+}
+
+// ── Миграция схемы (идемпотентно, в транзакции) ──────────────────────
+// pf_stock: составной PK (id, location) + пороги crit/max; stock: порог crit.
+// Существующие остатки ПФ трактуем как «в цеху» (location='workshop').
+// Перед первой миграцией делает бэкап остатков stock/pf_stock в KV одним ключом.
+async function migrateSchema(client) {
+  const pkCols = (await client.query(
+    `SELECT kcu.column_name, tc.constraint_name
+       FROM information_schema.table_constraints tc
+       JOIN information_schema.key_column_usage kcu
+         ON kcu.constraint_name = tc.constraint_name
+        AND kcu.table_schema = tc.table_schema
+        AND kcu.table_name = tc.table_name
+      WHERE tc.table_name='pf_stock' AND tc.constraint_type='PRIMARY KEY'`)).rows;
+  const pkNames = pkCols.map(r => r.column_name);
+  const isComposite = pkNames.length === 2 && pkNames.includes('id') && pkNames.includes('location');
+  const pfHasLoc = (await client.query(
+    `SELECT 1 FROM information_schema.columns
+      WHERE table_name='pf_stock' AND column_name='location'`)).rows.length > 0;
+  const needsMigration = !pfHasLoc || !isComposite;
+
+  await client.query('BEGIN');
+  try {
+    if (needsMigration) {
+      const stockDump = (await client.query('SELECT * FROM stock ORDER BY id')).rows;
+      const pfDump = (await client.query('SELECT * FROM pf_stock ORDER BY id')).rows;
+      const backupKey = 'yaya_schema_backup_' + Date.now();
+      await kvSet(backupKey, { stock: stockDump, pf_stock: pfDump }, client);
+      console.log('[schema] backup →', backupKey);
+    }
+
+    await client.query(`ALTER TABLE stock ADD COLUMN IF NOT EXISTS crit NUMERIC NOT NULL DEFAULT 0`);
+
+    await client.query(`ALTER TABLE pf_stock ADD COLUMN IF NOT EXISTS location TEXT NOT NULL DEFAULT 'workshop'`);
+    await client.query(`ALTER TABLE pf_stock ADD COLUMN IF NOT EXISTS crit NUMERIC NOT NULL DEFAULT 0`);
+    await client.query(`ALTER TABLE pf_stock ADD COLUMN IF NOT EXISTS max NUMERIC`);
+
+    if (!isComposite) {
+      const cname = pkCols.length ? pkCols[0].constraint_name : 'pf_stock_pkey';
+      await client.query(`ALTER TABLE pf_stock DROP CONSTRAINT ` + cname);
+      await client.query(`ALTER TABLE pf_stock ADD PRIMARY KEY (id, location)`);
+    }
+
+    await client.query('COMMIT');
+  } catch (e) {
+    await client.query('ROLLBACK');
+    throw e;
   }
 }
 
@@ -349,6 +398,7 @@ async function initDb() {
       CREATE INDEX IF NOT EXISTS idx_prodlog_ts    ON production_log(ts DESC);
       CREATE INDEX IF NOT EXISTS idx_purch_ts      ON purchases(ts DESC);
     `);
+    await migrateSchema(client);
     await seedIfEmpty(client);
     client.release();
   } catch (e) {
@@ -503,7 +553,7 @@ app.get('/stock', requireAnyRole, async (req, res) => {
   try {
     const loc = req.query.location;
     const { rows } = await pool.query(
-      `SELECT id, name, qty, unit, min, max, location, updated_at FROM stock
+      `SELECT id, name, qty, unit, min, crit, max, location, updated_at FROM stock
         WHERE ($1::text IS NULL OR location=$1) ORDER BY id`,
       [loc || null]);
     res.json({ ok: true, items: rows });
@@ -624,7 +674,7 @@ app.get('/purchases', requireAnyRole, async (req, res) => {
 // ── ПФ-СКЛАД (полуфабрикаты) ─────────────────────────────────────────
 app.get('/pf-stock', requireAnyRole, async (req, res) => {
   try {
-    const { rows } = await pool.query('SELECT id, name, qty, unit, min, updated_at FROM pf_stock ORDER BY id');
+    const { rows } = await pool.query('SELECT id, name, qty, unit, min, crit, max, location, updated_at FROM pf_stock ORDER BY id, location');
     res.json({ ok: true, items: rows });
   } catch (e) { res.status(500).json({ ok: false, error: String(e) }); }
 });
