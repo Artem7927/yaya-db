@@ -17,7 +17,7 @@ const express = require('express');
 const crypto = require('crypto');
 const { Pool } = require('pg');
 const webpush = require('web-push');
-const { DEFAULT_STOCK, DEFAULT_WS_STOCK, DEFAULT_WS_RECIPES, DEFAULT_TECH_CARDS } = require('./seed');
+const { DEFAULT_STOCK, DEFAULT_WS_STOCK, DEFAULT_WS_RECIPES, DEFAULT_COOK_RECIPES, DEFAULT_TECH_CARDS } = require('./seed');
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -224,6 +224,9 @@ async function seedIfEmpty(client) {
   }
   if ((await kvGet('yaya_wsrecipes_v3', client)) == null) {
     await kvSet('yaya_wsrecipes_v3', DEFAULT_WS_RECIPES, client);
+  }
+  if ((await kvGet('yaya_cookrecipes_v1', client)) == null) {
+    await kvSet('yaya_cookrecipes_v1', DEFAULT_COOK_RECIPES, client);
   }
   if ((await kvGet('yaya_settings', client)) == null) {
     await kvSet('yaya_settings', { cook_minutes: 15, fulfill_minutes: 90 }, client);
@@ -813,6 +816,64 @@ app.post('/produce', requireRole('MANAGER', 'WORKSHOP'), async (req, res) => {
       await client.query('COMMIT');
       client.release();
       res.json({ ok: true, outputId: rec.outputId, qty: outQty, unit: rec.outputUnit });
+    } catch (e) { await client.query('ROLLBACK'); client.release(); throw e; }
+  } catch (e) { res.status(500).json({ ok: false, error: String(e) }); }
+});
+
+// ── ГОТОВКА (кухня, стадия 1: сырьё → готовые порции) ─────────────────
+// POST /cook { dishId, qty, name?, emoji? } — транзакция, по образцу /produce.
+// Готовые порции начисляются в pf_stock(location='kitchen') id='ready_'+dishId.
+app.post('/cook', requireRole('MANAGER', 'KITCHEN'), async (req, res) => {
+  try {
+    const dishId = req.body.dishId, N = Math.max(1, Number(req.body.qty) || 1);
+    const prepList = (await kvGet('yaya_cookrecipes_v1')) || DEFAULT_COOK_RECIPES;
+    const prep = Array.isArray(prepList) ? prepList.find(r => r.id === dishId) : null;
+    if (!prep) return res.status(404).json({ ok: false, error: 'Нет готовочной техкарты' });
+    const name = req.body.name || prep.name;
+    const emoji = req.body.emoji || prep.emoji || '';
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      let spent = 0;
+      for (const it of prep.items) {
+        const need = Number(it.qty) * N;
+        const raw = (await client.query('SELECT * FROM stock WHERE id=$1 FOR UPDATE', [it.ingId])).rows[0];
+        if (raw) {
+          if (Number(raw.qty) < need) {
+            await client.query('ROLLBACK'); client.release();
+            return res.status(400).json({ ok: false, error: 'Недостаточно сырья: ' + raw.name });
+          }
+          await client.query('UPDATE stock SET qty=qty-$1, updated_at=now() WHERE id=$2', [need, it.ingId]);
+          await client.query('INSERT INTO deductions (ing, qty, unit, reason, emp) VALUES ($1,$2,$3,$4,$5)',
+            [raw.name, '-' + Number(need.toFixed(4)), it.unit, 'Готовка: ' + prep.name + ' ×' + N, req.role]);
+        } else {
+          const pf = (await client.query('SELECT * FROM pf_stock WHERE id=$1 AND location=$2 FOR UPDATE', [it.ingId, 'kitchen'])).rows[0];
+          if (!pf) { await client.query('ROLLBACK'); client.release(); return res.status(404).json({ ok: false, error: 'Нет ингредиента ' + it.ingId }); }
+          if (Number(pf.qty) < need) {
+            await client.query('ROLLBACK'); client.release();
+            return res.status(400).json({ ok: false, error: 'Недостаточно сырья: ' + pf.name });
+          }
+          await client.query('UPDATE pf_stock SET qty=qty-$1, updated_at=now() WHERE id=$2 AND location=$3', [need, it.ingId, 'kitchen']);
+          await client.query('INSERT INTO deductions (ing, qty, unit, reason, emp) VALUES ($1,$2,$3,$4,$5)',
+            ['[ПФ] ' + pf.name, '-' + Number(need.toFixed(4)), it.unit, 'Готовка: ' + prep.name + ' ×' + N, req.role]);
+        }
+        if (it.unit === 'кг' || it.unit === 'л') spent += need;
+      }
+      const outId = prep.outputId || ('ready_' + dishId);
+      const outN = (Number(prep.outputQty) || 1) * N;
+      await client.query(
+        `INSERT INTO pf_stock (id,name,qty,unit,min,location) VALUES ($1,$2,$3,$4,
+           COALESCE((SELECT min FROM pf_stock WHERE id=$1 AND location='kitchen'),0), 'kitchen')
+         ON CONFLICT (id,location) DO UPDATE SET qty=pf_stock.qty+EXCLUDED.qty, updated_at=now()`,
+        [outId, name, outN, prep.outputUnit || 'шт.']);
+      await client.query(
+        'INSERT INTO cook_log (dish_id, name, emoji, qty, spent_kg) VALUES ($1,$2,$3,$4,$5)',
+        [dishId, name, emoji, N, Number(spent.toFixed(4))]);
+      const readyRow = (await client.query('SELECT qty FROM pf_stock WHERE id=$1 AND location=$2', [outId, 'kitchen'])).rows[0];
+      const ready = Number(readyRow ? readyRow.qty : outN);
+      await client.query('COMMIT');
+      client.release();
+      res.json({ ok: true, outputId: outId, ready, spentKg: Number(spent.toFixed(4)) });
     } catch (e) { await client.query('ROLLBACK'); client.release(); throw e; }
   } catch (e) { res.status(500).json({ ok: false, error: String(e) }); }
 });

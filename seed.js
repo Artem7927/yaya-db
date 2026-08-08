@@ -144,6 +144,15 @@ const DEFAULT_WS_RECIPES = [
    ], outputId:'p10', outputQty:1, outputUnit:'кг'},
 ];
 
+// ─── Готовка кухни: «сырьё → готовые порции» (стадия 1) ───────────────
+// id = menuId блюда; outputId = 'ready_'+id (строки pf_stock location='kitchen').
+const DEFAULT_COOK_RECIPES = [
+  { id:'s14', name:'Фри', emoji:'🍟',
+    items:[
+      { ingId:'r31', qty:0.2, unit:'кг' },
+    ], outputId:'ready_s14', outputQty:1, outputUnit:'шт.' },
+];
+
 const DEFAULT_TECH_CARDS = {
   'w6':  [{ingId:'p1',qty:30,unit:'шт.'}],
   'w7':  [{ingId:'p1',qty:20,unit:'шт.'}],
@@ -189,4 +198,4 @@ const DEFAULT_TECH_CARDS = {
   's5': [{ingId:'r36',qty:0.2,unit:'кг'},{ingId:'r31',qty:0.15,unit:'кг'},{ingId:'p1',qty:2,unit:'шт.'}],
 };
 
-module.exports = { DEFAULT_STOCK, DEFAULT_WS_STOCK, DEFAULT_WS_RECIPES, DEFAULT_TECH_CARDS };
+module.exports = { DEFAULT_STOCK, DEFAULT_WS_STOCK, DEFAULT_WS_RECIPES, DEFAULT_COOK_RECIPES, DEFAULT_TECH_CARDS };
