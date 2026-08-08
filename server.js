@@ -817,7 +817,8 @@ app.post('/produce', requireRole('MANAGER', 'WORKSHOP'), async (req, res) => {
 });
 
 // ── ПЕРЕМЕЩЕНИЯ цех↔кухня ───────────────────────────────────────────
-// POST /transfer { dir:'ws-ks'|'ks-ws', fromId, toId, qty }
+// POST /transfer { dir:'ws-ks'|'ks-ws', fromId, qty } — перемещение полуфабрикатов
+// между локациями pf_stock. Приёмник = тот же id в другой локации; toId НЕ используется.
 app.post('/transfer', requireRole('MANAGER', 'WORKSHOP', 'KITCHEN'), async (req, res) => {
   try {
     const b = req.body || {};
@@ -827,36 +828,25 @@ app.post('/transfer', requireRole('MANAGER', 'WORKSHOP', 'KITCHEN'), async (req,
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
-      let fromName = '', toName = '—', unit = '';
-      if (dir === 'ws-ks') {
-        const from = (await client.query('SELECT * FROM pf_stock WHERE id=$1 FOR UPDATE', [b.fromId])).rows[0];
-        if (!from) { await client.query('ROLLBACK'); client.release(); return res.status(404).json({ ok: false, error: 'Нет полуфабриката' }); }
-        if (Number(from.qty) < qty) { await client.query('ROLLBACK'); client.release(); return res.status(400).json({ ok: false, error: 'Мало на складе: ' + from.name }); }
-        await client.query('UPDATE pf_stock SET qty=qty-$1, updated_at=now() WHERE id=$2', [qty, b.fromId]);
-        fromName = from.name; unit = from.unit;
-        if (b.toId) {
-          const to = (await client.query('SELECT * FROM stock WHERE id=$1 FOR UPDATE', [b.toId])).rows[0];
-          if (!to) { await client.query('ROLLBACK'); client.release(); return res.status(404).json({ ok: false, error: 'Нет позиции приёмника' }); }
-          await client.query('UPDATE stock SET qty=qty+$1, updated_at=now() WHERE id=$2', [qty, b.toId]);
-          toName = to.name;
-        }
-      } else {
-        const from = (await client.query('SELECT * FROM stock WHERE id=$1 FOR UPDATE', [b.fromId])).rows[0];
-        if (!from) { await client.query('ROLLBACK'); client.release(); return res.status(404).json({ ok: false, error: 'Нет позиции' }); }
-        if (Number(from.qty) < qty) { await client.query('ROLLBACK'); client.release(); return res.status(400).json({ ok: false, error: 'Мало на складе: ' + from.name }); }
-        await client.query('UPDATE stock SET qty=qty-$1, updated_at=now() WHERE id=$2', [qty, b.fromId]);
-        fromName = from.name; unit = from.unit;
-        if (b.toId) {
-          const to = (await client.query('SELECT * FROM stock WHERE id=$1 FOR UPDATE', [b.toId])).rows[0];
-          if (!to) { await client.query('ROLLBACK'); client.release(); return res.status(404).json({ ok: false, error: 'Нет позиции приёмника' }); }
-          await client.query('UPDATE stock SET qty=qty+$1, updated_at=now() WHERE id=$2', [qty, b.toId]);
-          toName = to.name;
-        }
-      }
+      const srcLoc = dir === 'ws-ks' ? 'workshop' : 'kitchen';
+      const dstLoc = dir === 'ws-ks' ? 'kitchen' : 'workshop';
+      // 1. Источник по (id, location) — составной ключ; FOR UPDATE
+      const from = (await client.query('SELECT * FROM pf_stock WHERE id=$1 AND location=$2 FOR UPDATE', [b.fromId, srcLoc])).rows[0];
+      if (!from) { await client.query('ROLLBACK'); client.release(); return res.status(404).json({ ok: false, error: 'Нет полуфабриката: ' + b.fromId + ' (' + srcLoc + ')' }); }
+      if (Number(from.qty) < qty) { await client.query('ROLLBACK'); client.release(); return res.status(400).json({ ok: false, error: 'Мало на складе: ' + from.name }); }
+      // 2. Списание с источника
+      await client.query('UPDATE pf_stock SET qty=qty-$1, updated_at=now() WHERE id=$2 AND location=$3', [qty, b.fromId, srcLoc]);
+      // 3. Приёмник — тот же id в другой локации; при конфликте складываем остаток
+      await client.query(
+        `INSERT INTO pf_stock (id,name,qty,unit,min,crit,location)
+         VALUES ($1,$2,$3,$4,$5,$6,$7)
+         ON CONFLICT (id,location) DO UPDATE SET qty=pf_stock.qty+EXCLUDED.qty, updated_at=now()`,
+        [b.fromId, from.name, qty, from.unit, from.min, from.crit, dstLoc]);
+      // 4. Журналы как раньше (метки ЦЕХ→КУХНЯ / КУХНЯ→ЦЕХ), emp=req.role
       await client.query('INSERT INTO transfers (dir, from_name, to_name, qty, unit, emp) VALUES ($1,$2,$3,$4,$5,$6)',
-        [dir, fromName, toName, qty, unit, req.role]);
+        [dir, from.name, from.name, qty, from.unit, req.role]);
       await client.query('INSERT INTO deductions (ing, qty, unit, reason, emp) VALUES ($1,$2,$3,$4,$5)',
-        ['[' + (dir === 'ws-ks' ? 'ЦЕХ→КУХНЯ' : 'КУХНЯ→ЦЕХ') + '] ' + fromName, '+' + qty, unit, 'Передача', req.role]);
+        ['[' + (dir === 'ws-ks' ? 'ЦЕХ→КУХНЯ' : 'КУХНЯ→ЦЕХ') + '] ' + from.name, '+' + qty, from.unit, 'Передача', req.role]);
       await client.query('COMMIT');
       client.release();
       res.json({ ok: true });
