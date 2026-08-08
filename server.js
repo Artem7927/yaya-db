@@ -803,8 +803,9 @@ app.post('/produce', requireRole('MANAGER', 'WORKSHOP'), async (req, res) => {
       }
       const outQty = Number(rec.outputQty) * batches;
       await client.query(
-        `INSERT INTO pf_stock (id, name, qty, unit, min, updated_at) VALUES ($1,$2,$3,$4,COALESCE((SELECT min FROM pf_stock WHERE id=$1),0),now())
-         ON CONFLICT (id) DO UPDATE SET qty=pf_stock.qty+$3, updated_at=now()`,
+        `INSERT INTO pf_stock (id,name,qty,unit,min,location) VALUES ($1,$2,$3,$4,
+           COALESCE((SELECT min FROM pf_stock WHERE id=$1 AND location='workshop'),0), 'workshop')
+         ON CONFLICT (id,location) DO UPDATE SET qty=pf_stock.qty+EXCLUDED.qty, updated_at=now()`,
         [rec.outputId, rec.name, outQty, rec.outputUnit]);
       await client.query(
         'INSERT INTO production_log (name, batches, qty, unit, spent_kg) VALUES ($1,$2,$3,$4,$5)',
@@ -964,9 +965,11 @@ app.get('/orders', async (req, res) => {
 // ── Техкарта по заказу (списание на сервере, единожды) ───────────────
 // items = [{id (menuId), qty, ...}]; tc = { menuId: [{ingId,qty,unit}] }
 // sign>0 — списать (done), sign<0 — вернуть (cancel)
+// ПФ кафе (location='kitchen'): списание — сколько есть, остаток — shortage (вариант B).
 async function applyTechCard(tc, items, sign, client) {
   const ded = [];
   const missing = [];
+  const shortage = [];
   for (const ci of items || []) {
     const recipe = ci && ci.id ? tc[ci.id] : null;
     if (!recipe) {
@@ -976,23 +979,46 @@ async function applyTechCard(tc, items, sign, client) {
     for (const r of recipe) {
       const need = Number((Number(r.qty) * (Number(ci.qty) || 1)).toFixed(4));
       if (!(need > 0)) continue;
-      const delta = sign > 0 ? -need : need;
-      const pf = (await client.query('SELECT * FROM pf_stock WHERE id=$1 FOR UPDATE', [r.ingId])).rows[0];
+      // 1. ПФ кафе — заказ ест из location='kitchen' (составной ключ, FOR UPDATE)
+      const pf = (await client.query(`SELECT * FROM pf_stock WHERE id=$1 AND location='kitchen' FOR UPDATE`, [r.ingId])).rows[0];
       if (pf) {
-        await client.query('UPDATE pf_stock SET qty=GREATEST(0,qty+$1), updated_at=now() WHERE id=$2', [delta, r.ingId]);
-        ded.push({ ing: pf.name, qty: (sign > 0 ? '-' : '+') + need, unit: r.unit,
-          reason: sign > 0 ? 'Автосписание по заказу' : 'Возврат по отмене', emp: 'Система' });
+        if (sign > 0) {
+          // списание: берём сколько есть, нехватку помечаем
+          const avail = Number(pf.qty);
+          const take = Math.min(need, avail);
+          await client.query(`UPDATE pf_stock SET qty=qty-$1, updated_at=now() WHERE id=$2 AND location='kitchen'`, [take, r.ingId]);
+          if (take > 0) ded.push({ ing: pf.name, qty: '-' + take, unit: r.unit,
+            reason: 'Автосписание по заказу', emp: 'Система' });
+          if (take < need) shortage.push({ id: r.ingId, name: pf.name, need, had: avail, short: Number((need - take).toFixed(4)), unit: r.unit });
+        } else {
+          // возврат по отмене — вся потребность назад в кафе
+          await client.query(`UPDATE pf_stock SET qty=qty+$1, updated_at=now() WHERE id=$2 AND location='kitchen'`, [need, r.ingId]);
+          ded.push({ ing: pf.name, qty: '+' + need, unit: r.unit,
+            reason: 'Возврат по отмене', emp: 'Система' });
+        }
         continue;
       }
+      // 2. Кафейной строки нет вовсе
+      if (sign > 0) {
+        // Это ПФ (есть хотя бы в цехе)? Тогда недостача, списывать нечего. Сырьё (r*) — не ПФ, идёт в stock.
+        const anyPf = (await client.query(`SELECT id, name FROM pf_stock WHERE id=$1 LIMIT 1`, [r.ingId])).rows[0];
+        if (anyPf) {
+          const name = (anyPf && anyPf.name) || (ci && ci.name) || String(r.ingId);
+          shortage.push({ id: r.ingId, name, need, had: 0, short: need, unit: r.unit });
+          continue;
+        }
+      }
+      // 3. Сырьё (stock) — как было: локация в строке, зажим GREATEST(0,...)
       const st = (await client.query('SELECT * FROM stock WHERE id=$1 FOR UPDATE', [r.ingId])).rows[0];
       if (st) {
+        const delta = sign > 0 ? -need : need;
         await client.query('UPDATE stock SET qty=GREATEST(0,qty+$1), updated_at=now() WHERE id=$2', [delta, r.ingId]);
         ded.push({ ing: st.name, qty: (sign > 0 ? '-' : '+') + need, unit: r.unit,
           reason: sign > 0 ? 'Автосписание по заказу' : 'Возврат по отмене', emp: 'Система' });
       }
     }
   }
-  return { ded, missing };
+  return { ded, missing, shortage };
 }
 async function insertDeductions(client, ded) {
   for (const d of ded) {
@@ -1016,6 +1042,7 @@ app.post('/orders/:id/status', requireRole('MANAGER', 'SUPERVISOR', 'ASSEMBLER')
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
+      let respShortage = null;
       const ord = (await client.query('SELECT * FROM orders WHERE id=$1 FOR UPDATE', [id])).rows[0];
       if (!ord) { await client.query('ROLLBACK'); client.release(); return res.status(404).json({ ok: false, error: 'Заказ не найден' }); }
       if (status === 'cook') {
@@ -1023,8 +1050,16 @@ app.post('/orders/:id/status', requireRole('MANAGER', 'SUPERVISOR', 'ASSEMBLER')
       } else if (status === 'done') {
         if (!ord.deducted) {
           const tc = (await kvGet('yaya_tech_v3', client)) || {};
-          const { ded, missing } = await applyTechCard(tc, (ord.data && ord.data.items) || [], 1, client);
+          const { ded, missing, shortage } = await applyTechCard(tc, (ord.data && ord.data.items) || [], 1, client);
           await insertDeductions(client, ded);
+          if (shortage && shortage.length) {
+            respShortage = shortage;
+            for (const s of shortage) {
+              await client.query('INSERT INTO deductions (ing, qty, unit, reason, emp) VALUES ($1,$2,$3,$4,$5)',
+                [s.name, '-' + s.short, s.unit, 'НЕДОСТАЧА ПФ в кафе', 'Система']);
+            }
+            console.warn('[deduct] order=' + ord.num + ' pf-shortage=' + shortage.map(s => s.id + ' / ' + s.name + ' need ' + s.need + ' had ' + s.had + ' short ' + s.short).join(', '));
+          }
           await client.query('UPDATE orders SET status=$1, deducted=true WHERE id=$2', ['done', id]);
           if (missing && missing.length) {
             await client.query("UPDATE orders SET data=jsonb_set(data,'{deduct_partial}','true',true) WHERE id=$1", [id]);
@@ -1048,7 +1083,7 @@ app.post('/orders/:id/status', requireRole('MANAGER', 'SUPERVISOR', 'ASSEMBLER')
       }
       await client.query('COMMIT');
       client.release();
-      res.json({ ok: true });
+      res.json({ ok: true, shortage: respShortage, deduct_shortage: !!(respShortage && respShortage.length) });
       try {
         const q = await pool.query('SELECT num FROM orders WHERE id=$1', [id]);
         const num = q.rows[0] && q.rows[0].num;
