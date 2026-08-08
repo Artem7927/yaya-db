@@ -823,6 +823,12 @@ app.post('/produce', requireRole('MANAGER', 'WORKSHOP'), async (req, res) => {
 // ── ГОТОВКА (кухня, стадия 1: сырьё → готовые порции) ─────────────────
 // POST /cook { dishId, qty, name?, emoji? } — транзакция, по образцу /produce.
 // Готовые порции начисляются в pf_stock(location='kitchen') id='ready_'+dishId.
+app.get('/cook-recipes', requireRole('MANAGER', 'KITCHEN'), async (req, res) => {
+  try {
+    res.json((await kvGet('yaya_cookrecipes_v1')) || DEFAULT_COOK_RECIPES);
+  } catch (e) { res.status(500).json({ ok: false, error: String(e) }); }
+});
+
 app.post('/cook', requireRole('MANAGER', 'KITCHEN'), async (req, res) => {
   try {
     const dishId = req.body.dishId, N = Math.max(1, Number(req.body.qty) || 1);
