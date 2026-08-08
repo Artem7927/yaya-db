@@ -241,6 +241,22 @@ async function seedIfEmpty(client) {
   }
 }
 
+// Одноразовая идемпотентная миграция: гарнир-фри в заказных техкартах
+// переводится на готовые порции (пул ready_s14 в pf_stock kitchen).
+// 1 порция = 0.2 кг ⇒ qty_ready = r31_kg / 0.2. Готовочный стор не трогается.
+async function migrateReadyFries(client) {
+  if ((await kvGet('yaya_migr_ready_fries_v1', client)) != null) return;
+  const tc = (await kvGet('yaya_tech_v3', client)) || DEFAULT_TECH_CARDS;
+  for (const dishId of Object.keys(tc)) {
+    tc[dishId] = (tc[dishId] || []).map(it =>
+      it.ingId === 'r31'
+        ? { ingId: 'ready_s14', qty: Number((Number(it.qty) / 0.2).toFixed(4)), unit: 'шт.' }
+        : it);
+  }
+  await kvSet('yaya_tech_v3', tc, client);
+  await kvSet('yaya_migr_ready_fries_v1', true, client);
+}
+
 // ── Миграция схемы (идемпотентно, в транзакции) ──────────────────────
 // pf_stock: составной PK (id, location) + пороги crit/max; stock: порог crit.
 // Существующие остатки ПФ трактуем как «в цеху» (location='workshop').
@@ -403,6 +419,7 @@ async function initDb() {
     `);
     await migrateSchema(client);
     await seedIfEmpty(client);
+    await migrateReadyFries(client);
     client.release();
   } catch (e) {
     client.release();
