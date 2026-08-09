@@ -1,17 +1,19 @@
 {
   "meta": {
-    "startedAt": "2026-08-08T22:53:38.077Z",
-    "wallMin": 7.9,
+    "startedAt": "2026-08-09T07:20:13.822Z",
+    "wallMin": 1.5,
     "simDaySec": 432,
-    "speed": 1,
+    "speed": 100,
     "compress": 100,
+    "seedOpening": true,
     "config": {
       "YAYA_API": "https://yaya-db-production.up.railway.app",
-      "SPEED": 1,
+      "SPEED": 100,
       "COMPRESS": 100,
       "DAY_START_H": 10,
       "DAY_END_H": 22,
       "ORDERS": 180,
+      "SEED_BUFFER": 1.5,
       "BASKET_MIN": 1,
       "BASKET_MAX": 3,
       "FRIES_SHARE": 0.18,
@@ -19,30 +21,33 @@
       "ACCEPT_MIN": 5,
       "COOK_MIN": 40,
       "MAX_INFLIGHT_ORDERS": 15,
+      "MAX_INFLIGHT_STATUS": 4,
       "TICK_MS": 1500,
       "TIMEOUT_MS": 20000,
+      "DEBUG_COOK": false,
       "MAX_WALL_MIN": 45,
       "RESET_START_NUM": 1,
       "POOL_ID": "ready_s14",
       "POOL_BUFFER": 12,
       "POOL_LOOKAHEAD_MIN": 45,
       "COOK_BATCH": 20,
-      "POOL_REFRESH_MS": 4000,
-      "COOK_MIN_GAP_MS": 3000,
+      "POOL_REFRESH_MS": 1200,
+      "COOK_MIN_GAP_MS": 1000,
       "R31_PER_PORTION": 0.2,
+      "R31_MARGIN_KG": 0.05,
       "REPORT_FILE": "C:\\Users\\ПК\\yaya-db\\tools\\day-sim-report.json"
     }
   },
   "orderAccounting": {
     "created": 180,
-    "done": 171,
-    "cancelled": 9,
+    "done": 167,
+    "cancelled": 13,
     "leftover": 0,
     "serverByStatus": {
       "new": 0,
-      "cook": 2,
-      "done": 169,
-      "cancel": 9
+      "cook": 0,
+      "done": 167,
+      "cancel": 13
     },
     "orderMatch": true,
     "formula": "created == done + cancelled + leftover",
@@ -51,48 +56,48 @@
   "arrivals": {
     "planned": 180,
     "friesPortionsPlanned": 94,
-    "peakRatePerMin": 1
+    "peakRatePerMin": 2739
   },
   "concurrency": {
-    "peak": 37,
-    "peakSim": 367.941,
-    "samples": 307
+    "peak": 180,
+    "peakSim": 452.8,
+    "samples": 54
   },
   "throughput": {
     "offeredPerMin": 25,
-    "effectivePerMin": 1367.1,
-    "creationWallMs": 431.6
+    "effectivePerMin": 7200,
+    "creationWallMs": 73.8
   },
   "latency": {
     "POST /order": {
-      "n": 238,
-      "p50": 272,
-      "p95": 1966,
-      "max": 4988,
+      "n": 294,
+      "p50": 328,
+      "p95": 1068,
+      "max": 1310,
       "errors": {
-        "x429": 58,
+        "x429": 114,
         "x5xx": 0,
         "timeout": 0,
         "other": 0
       }
     },
     "POST /orders/:id/status": {
-      "n": 369,
-      "p50": 317,
-      "p95": 1853,
-      "max": 6296,
+      "n": 377,
+      "p50": 288,
+      "p95": 1055,
+      "max": 1836,
       "errors": {
         "x429": 0,
-        "x5xx": 2,
+        "x5xx": 4,
         "timeout": 0,
         "other": 0
       }
     },
     "POST /cook": {
-      "n": 108,
-      "p50": 277,
-      "p95": 546,
-      "max": 3666,
+      "n": 7,
+      "p50": 306,
+      "p95": 1452,
+      "max": 1723,
       "errors": {
         "x429": 0,
         "x5xx": 0,
@@ -101,10 +106,10 @@
       }
     },
     "GET /stock": {
-      "n": 47,
-      "p50": 283,
-      "p95": 622,
-      "max": 4838,
+      "n": 56,
+      "p50": 271,
+      "p95": 575,
+      "max": 1111,
       "errors": {
         "x429": 0,
         "x5xx": 0,
@@ -113,10 +118,10 @@
       }
     },
     "GET /pf-stock": {
-      "n": 103,
-      "p50": 293,
-      "p95": 643,
-      "max": 6536,
+      "n": 53,
+      "p50": 279,
+      "p95": 734,
+      "max": 1252,
       "errors": {
         "x429": 0,
         "x5xx": 0,
@@ -126,9 +131,9 @@
     },
     "GET /orders": {
       "n": 181,
-      "p50": 280,
-      "p95": 596,
-      "max": 3064,
+      "p50": 418,
+      "p95": 1114,
+      "max": 2403,
       "errors": {
         "x429": 0,
         "x5xx": 0,
@@ -138,9 +143,9 @@
     },
     "GET /cook-log": {
       "n": 2,
-      "p50": 280,
-      "p95": 280,
-      "max": 520,
+      "p50": 267,
+      "p95": 267,
+      "max": 286,
       "errors": {
         "x429": 0,
         "x5xx": 0,
@@ -150,9 +155,9 @@
     },
     "GET /deductions": {
       "n": 1,
-      "p50": 280,
-      "p95": 280,
-      "max": 280,
+      "p50": 274,
+      "p95": 274,
+      "max": 274,
       "errors": {
         "x429": 0,
         "x5xx": 0,
@@ -162,9 +167,9 @@
     },
     "GET /kv/:key": {
       "n": 2,
-      "p50": 558,
-      "p95": 558,
-      "max": 622,
+      "p50": 472,
+      "p95": 472,
+      "max": 570,
       "errors": {
         "x429": 0,
         "x5xx": 0,
@@ -174,9 +179,9 @@
     },
     "GET /cook-recipes": {
       "n": 1,
-      "p50": 410,
-      "p95": 410,
-      "max": 410,
+      "p50": 265,
+      "p95": 265,
+      "max": 265,
       "errors": {
         "x429": 0,
         "x5xx": 0,
@@ -185,10 +190,10 @@
       }
     },
     "PATCH /stock/:id": {
-      "n": 6,
-      "p50": 273,
-      "p95": 289,
-      "max": 336,
+      "n": 20,
+      "p50": 268,
+      "p95": 280,
+      "max": 349,
       "errors": {
         "x429": 0,
         "x5xx": 0,
@@ -197,10 +202,22 @@
       }
     },
     "PATCH /pf-stock/:id": {
-      "n": 12,
-      "p50": 276,
-      "p95": 309,
-      "max": 309,
+      "n": 21,
+      "p50": 266,
+      "p95": 291,
+      "max": 323,
+      "errors": {
+        "x429": 0,
+        "x5xx": 0,
+        "timeout": 0,
+        "other": 0
+      }
+    },
+    "POST /transfer": {
+      "n": 0,
+      "p50": 0,
+      "p95": 0,
+      "max": 0,
       "errors": {
         "x429": 0,
         "x5xx": 0,
@@ -210,9 +227,9 @@
     },
     "POST /admin/reset-orders": {
       "n": 2,
-      "p50": 317,
-      "p95": 317,
-      "max": 326,
+      "p50": 281,
+      "p95": 281,
+      "max": 304,
       "errors": {
         "x429": 0,
         "x5xx": 0,
@@ -222,1241 +239,404 @@
     }
   },
   "errors": {
-    "order429Count": 58,
+    "order429Count": 114,
     "order429Sample": [
       {
-        "wall": "2026-08-08T22:48:14.385Z",
-        "sim": 149.529,
+        "wall": "2026-08-09T07:18:49.581Z",
+        "sim": 608.3,
         "attempt": 1
       },
       {
-        "wall": "2026-08-08T22:48:17.401Z",
-        "sim": 152.545,
+        "wall": "2026-08-09T07:18:50.193Z",
+        "sim": 669.5,
         "attempt": 1
       },
       {
-        "wall": "2026-08-08T22:48:18.916Z",
-        "sim": 154.06,
+        "wall": "2026-08-09T07:18:50.209Z",
+        "sim": 671.1,
+        "attempt": 1
+      },
+      {
+        "wall": "2026-08-09T07:18:50.260Z",
+        "sim": 676.2,
+        "attempt": 1
+      },
+      {
+        "wall": "2026-08-09T07:18:50.736Z",
+        "sim": 723.8,
+        "attempt": 1
+      },
+      {
+        "wall": "2026-08-09T07:18:50.741Z",
+        "sim": 724.3,
+        "attempt": 1
+      },
+      {
+        "wall": "2026-08-09T07:18:50.752Z",
+        "sim": 725.4,
+        "attempt": 1
+      },
+      {
+        "wall": "2026-08-09T07:18:50.866Z",
+        "sim": 736.8,
+        "attempt": 1
+      },
+      {
+        "wall": "2026-08-09T07:18:51.438Z",
+        "sim": 794,
+        "attempt": 1
+      },
+      {
+        "wall": "2026-08-09T07:18:51.453Z",
+        "sim": 795.5,
+        "attempt": 1
+      },
+      {
+        "wall": "2026-08-09T07:18:51.533Z",
+        "sim": 803.5,
+        "attempt": 1
+      },
+      {
+        "wall": "2026-08-09T07:18:51.825Z",
+        "sim": 832.7,
+        "attempt": 1
+      },
+      {
+        "wall": "2026-08-09T07:18:52.210Z",
+        "sim": 871.2,
+        "attempt": 1
+      },
+      {
+        "wall": "2026-08-09T07:18:52.692Z",
+        "sim": 919.4,
+        "attempt": 1
+      },
+      {
+        "wall": "2026-08-09T07:18:53.541Z",
+        "sim": 1004.3,
+        "attempt": 1
+      },
+      {
+        "wall": "2026-08-09T07:18:53.810Z",
+        "sim": 1031.2,
         "attempt": 2
       },
       {
-        "wall": "2026-08-08T22:48:25.077Z",
-        "sim": 160.221,
-        "attempt": 1
-      },
-      {
-        "wall": "2026-08-08T22:48:25.853Z",
-        "sim": 160.997,
-        "attempt": 3
-      },
-      {
-        "wall": "2026-08-08T22:51:03.411Z",
-        "sim": 318.555,
-        "attempt": 1
-      },
-      {
-        "wall": "2026-08-08T22:51:04.808Z",
-        "sim": 319.952,
-        "attempt": 1
-      },
-      {
-        "wall": "2026-08-08T22:51:06.323Z",
-        "sim": 321.467,
-        "attempt": 1
-      },
-      {
-        "wall": "2026-08-08T22:51:07.870Z",
-        "sim": 323.014,
-        "attempt": 1
-      },
-      {
-        "wall": "2026-08-08T22:51:09.352Z",
-        "sim": 324.496,
-        "attempt": 1
-      },
-      {
-        "wall": "2026-08-08T22:51:10.586Z",
-        "sim": 325.73,
+        "wall": "2026-08-09T07:18:53.813Z",
+        "sim": 1031.5,
         "attempt": 2
       },
       {
-        "wall": "2026-08-08T22:51:10.843Z",
-        "sim": 325.987,
+        "wall": "2026-08-09T07:18:54.001Z",
+        "sim": 1050.3,
         "attempt": 1
       },
       {
-        "wall": "2026-08-08T22:51:11.611Z",
-        "sim": 326.755,
+        "wall": "2026-08-09T07:18:54.254Z",
+        "sim": 1075.6,
+        "attempt": 1
+      },
+      {
+        "wall": "2026-08-09T07:18:54.316Z",
+        "sim": 1081.8,
         "attempt": 2
       },
       {
-        "wall": "2026-08-08T22:51:12.359Z",
-        "sim": 327.503,
-        "attempt": 1
-      },
-      {
-        "wall": "2026-08-08T22:51:13.376Z",
-        "sim": 328.52,
+        "wall": "2026-08-09T07:18:54.765Z",
+        "sim": 1126.7,
         "attempt": 2
       },
       {
-        "wall": "2026-08-08T22:51:13.867Z",
-        "sim": 329.011,
-        "attempt": 1
-      },
-      {
-        "wall": "2026-08-08T22:51:14.564Z",
-        "sim": 329.708,
+        "wall": "2026-08-09T07:18:55.347Z",
+        "sim": 1184.9,
         "attempt": 2
       },
       {
-        "wall": "2026-08-08T22:51:15.487Z",
-        "sim": 330.632,
-        "attempt": 1
-      },
-      {
-        "wall": "2026-08-08T22:51:16.854Z",
-        "sim": 331.998,
-        "attempt": 3
-      },
-      {
-        "wall": "2026-08-08T22:51:17.792Z",
-        "sim": 332.936,
+        "wall": "2026-08-09T07:18:55.347Z",
+        "sim": 1184.9,
         "attempt": 2
       },
       {
-        "wall": "2026-08-08T22:51:18.199Z",
-        "sim": 333.343,
-        "attempt": 3
+        "wall": "2026-08-09T07:18:55.384Z",
+        "sim": 1188.6,
+        "attempt": 2
       },
       {
-        "wall": "2026-08-08T22:51:19.606Z",
-        "sim": 334.75,
-        "attempt": 3
-      },
-      {
-        "wall": "2026-08-08T22:51:19.896Z",
-        "sim": 335.04,
-        "attempt": 1
-      },
-      {
-        "wall": "2026-08-08T22:51:20.938Z",
-        "sim": 336.082,
-        "attempt": 3
-      },
-      {
-        "wall": "2026-08-08T22:51:21.427Z",
-        "sim": 336.571,
-        "attempt": 1
+        "wall": "2026-08-09T07:18:55.458Z",
+        "sim": 1196,
+        "attempt": 2
       }
     ]
   },
-  "pool": {
-    "producedPortions": 0,
-    "producedKg": 0,
-    "producedServer": 0,
-    "cookBatches": 0,
-    "cookRejected400": 108,
-    "cookRejected400Sample": [
+  "seed": {
+    "demand": {
+      "p4": 52,
+      "r27": 80,
+      "p1": 1250,
+      "ready_s14": 94,
+      "r34": 61,
+      "p5": 7.020000000000002,
+      "r28": 62,
+      "p7": 3.2999999999999967,
+      "r35": 6.559999999999997,
+      "p3": 41,
+      "p8": 1.600000000000001,
+      "p9": 1.600000000000001,
+      "p2": 572,
+      "p6": 6.900000000000003,
+      "p10": 6.299999999999994,
+      "r37": 0.08,
+      "r29": 49,
+      "r36": 3.2000000000000006,
+      "r24": 2.3200000000000007,
+      "r33": 0.44999999999999996,
+      "r31": 18.8
+    },
+    "stock": [
       {
-        "sim": 1.516,
-        "qty": 1,
-        "err": "Недостаточно сырья: Картофель фри"
+        "id": "r27",
+        "demand": 80,
+        "seeded": 120,
+        "ok": true
       },
       {
-        "sim": 6.04,
-        "qty": 1,
-        "err": "Недостаточно сырья: Картофель фри"
+        "id": "r34",
+        "demand": 61,
+        "seeded": 91.5,
+        "ok": true
       },
       {
-        "sim": 10.569,
-        "qty": 1,
-        "err": "Недостаточно сырья: Картофель фри"
+        "id": "r28",
+        "demand": 62,
+        "seeded": 93,
+        "ok": true
       },
       {
-        "sim": 15.087,
-        "qty": 1,
-        "err": "Недостаточно сырья: Картофель фри"
+        "id": "r35",
+        "demand": 6.56,
+        "seeded": 9.84,
+        "ok": true
       },
       {
-        "sim": 19.616,
-        "qty": 1,
-        "err": "Недостаточно сырья: Картофель фри"
+        "id": "r37",
+        "demand": 0.08,
+        "seeded": 0.12,
+        "ok": true
       },
       {
-        "sim": 22.632,
-        "qty": 1,
-        "err": "Недостаточно сырья: Картофель фри"
+        "id": "r29",
+        "demand": 49,
+        "seeded": 73.5,
+        "ok": true
       },
       {
-        "sim": 27.138,
-        "qty": 1,
-        "err": "Недостаточно сырья: Картофель фри"
+        "id": "r36",
+        "demand": 3.2,
+        "seeded": 4.8,
+        "ok": true
       },
       {
-        "sim": 30.156,
-        "qty": 1,
-        "err": "Недостаточно сырья: Картофель фри"
+        "id": "r24",
+        "demand": 2.32,
+        "seeded": 3.48,
+        "ok": true
       },
       {
-        "sim": 33.175,
-        "qty": 1,
-        "err": "Недостаточно сырья: Картофель фри"
+        "id": "r33",
+        "demand": 0.45,
+        "seeded": 0.68,
+        "ok": true
       },
       {
-        "sim": 37.7,
-        "qty": 1,
-        "err": "Недостаточно сырья: Картофель фри"
+        "id": "r31",
+        "demand": 18.8,
+        "seeded": 28.2,
+        "ok": true
       }
     ],
-    "readyShortOrders": 39,
-    "shortagesTotal": 507
+    "pf": [
+      {
+        "id": "p4",
+        "want": 78,
+        "mode": "skip-enough"
+      },
+      {
+        "id": "p1",
+        "want": 1875,
+        "mode": "patch",
+        "ok": true
+      },
+      {
+        "id": "p5",
+        "want": 10.53,
+        "mode": "patch",
+        "ok": true
+      },
+      {
+        "id": "p7",
+        "want": 4.95,
+        "mode": "patch",
+        "ok": true
+      },
+      {
+        "id": "p3",
+        "want": 61.5,
+        "mode": "patch",
+        "ok": true
+      },
+      {
+        "id": "p8",
+        "want": 2.4,
+        "mode": "patch",
+        "ok": true
+      },
+      {
+        "id": "p9",
+        "want": 2.4,
+        "mode": "patch",
+        "ok": true
+      },
+      {
+        "id": "p2",
+        "want": 858,
+        "mode": "patch",
+        "ok": true
+      },
+      {
+        "id": "p6",
+        "want": 10.35,
+        "mode": "patch",
+        "ok": true
+      },
+      {
+        "id": "p10",
+        "want": 9.45,
+        "mode": "patch",
+        "ok": true
+      }
+    ],
+    "poolZeroed": true,
+    "preSeed": {
+      "r31": 0.15,
+      "ready_s14_kitchen": 4.5
+    },
+    "baseline": {
+      "ready_s14_kitchen": 0
+    }
   },
-  "shortages": [
-    {
-      "sim": 57.646,
-      "order": 1,
-      "id": "p2",
-      "name": "Стрипсы маринованные (гот.)",
-      "need": 7,
-      "had": 0,
-      "short": 7
-    },
-    {
-      "sim": 57.646,
-      "order": 1,
-      "id": "p8",
-      "name": "Бургер красный соус (гот.)",
-      "need": 0.04,
-      "had": 0,
-      "short": 0.04
-    },
-    {
-      "sim": 57.646,
-      "order": 1,
-      "id": "p9",
-      "name": "Бургер белый соус (гот.)",
-      "need": 0.04,
-      "had": 0,
-      "short": 0.04
-    },
-    {
-      "sim": 72.691,
-      "order": 2,
-      "id": "p2",
-      "name": "Стрипсы маринованные (гот.)",
-      "need": 14,
-      "had": 0,
-      "short": 14
-    },
-    {
-      "sim": 72.691,
-      "order": 2,
-      "id": "p10",
-      "name": "Тесто для блинов (гот.)",
-      "need": 0.1,
-      "had": 0,
-      "short": 0.1
-    },
-    {
-      "sim": 72.691,
-      "order": 2,
-      "id": "p8",
-      "name": "Бургер красный соус (гот.)",
-      "need": 0.03,
-      "had": 0,
-      "short": 0.03
-    },
-    {
-      "sim": 72.691,
-      "order": 2,
-      "id": "p9",
-      "name": "Бургер белый соус (гот.)",
-      "need": 0.03,
-      "had": 0,
-      "short": 0.03
-    },
-    {
-      "sim": 75.724,
-      "order": 3,
-      "id": "p3",
-      "name": "Котлета куриная (гот.)",
-      "need": 1,
-      "had": 0,
-      "short": 1
-    },
-    {
-      "sim": 75.724,
-      "order": 3,
-      "id": "p8",
-      "name": "Бургер красный соус (гот.)",
-      "need": 0.03,
-      "had": 0,
-      "short": 0.03
-    },
-    {
-      "sim": 75.724,
-      "order": 3,
-      "id": "p9",
-      "name": "Бургер белый соус (гот.)",
-      "need": 0.03,
-      "had": 0,
-      "short": 0.03
-    },
-    {
-      "sim": 84.742,
-      "order": 4,
-      "id": "p8",
-      "name": "Бургер красный соус (гот.)",
-      "need": 0.04,
-      "had": 0,
-      "short": 0.04
-    },
-    {
-      "sim": 84.742,
-      "order": 4,
-      "id": "p9",
-      "name": "Бургер белый соус (гот.)",
-      "need": 0.04,
-      "had": 0,
-      "short": 0.04
-    },
-    {
-      "sim": 84.742,
-      "order": 4,
-      "id": "p5",
-      "name": "Шампур куриный (гот.)",
-      "need": 0.2,
-      "had": 0,
-      "short": 0.2
-    },
-    {
-      "sim": 84.742,
-      "order": 4,
-      "id": "p7",
-      "name": "Донер соус (гот.)",
-      "need": 0.05,
-      "had": 0,
-      "short": 0.05
-    },
-    {
-      "sim": 86.195,
-      "order": 5,
-      "id": "p5",
-      "name": "Шампур куриный (гот.)",
-      "need": 0.2,
-      "had": 0,
-      "short": 0.2
-    },
-    {
-      "sim": 86.195,
-      "order": 5,
-      "id": "p7",
-      "name": "Донер соус (гот.)",
-      "need": 0.05,
-      "had": 0,
-      "short": 0.05
-    },
-    {
-      "sim": 87.747,
-      "order": 6,
-      "id": "p10",
-      "name": "Тесто для блинов (гот.)",
-      "need": 0.1,
-      "had": 0,
-      "short": 0.1
-    },
-    {
-      "sim": 87.747,
-      "order": 6,
-      "id": "p6",
-      "name": "Шампур говяжий (гот.)",
-      "need": 0.08,
-      "had": 0,
-      "short": 0.08
-    },
-    {
-      "sim": 90.752,
-      "order": 7,
-      "id": "p1",
-      "name": "Крылышки маринованные (гот.)",
-      "need": 30,
-      "had": 0,
-      "short": 30
-    },
-    {
-      "sim": 90.752,
-      "order": 7,
-      "id": "p5",
-      "name": "Шампур куриный (гот.)",
-      "need": 0.1,
-      "had": 0,
-      "short": 0.1
-    },
-    {
-      "sim": 90.752,
-      "order": 7,
-      "id": "p6",
-      "name": "Шампур говяжий (гот.)",
-      "need": 0.1,
-      "had": 0,
-      "short": 0.1
-    },
-    {
-      "sim": 90.752,
-      "order": 7,
-      "id": "p7",
-      "name": "Донер соус (гот.)",
-      "need": 0.05,
-      "had": 0,
-      "short": 0.05
-    },
-    {
-      "sim": 90.752,
-      "order": 7,
-      "id": "p8",
-      "name": "Бургер красный соус (гот.)",
-      "need": 0.03,
-      "had": 0,
-      "short": 0.03
-    },
-    {
-      "sim": 90.752,
-      "order": 7,
-      "id": "p9",
-      "name": "Бургер белый соус (гот.)",
-      "need": 0.03,
-      "had": 0,
-      "short": 0.03
-    },
-    {
-      "sim": 97.017,
-      "order": 8,
-      "id": "p5",
-      "name": "Шампур куриный (гот.)",
-      "need": 0.2,
-      "had": 0,
-      "short": 0.2
-    },
-    {
-      "sim": 97.017,
-      "order": 8,
-      "id": "p7",
-      "name": "Донер соус (гот.)",
-      "need": 0.05,
-      "had": 0,
-      "short": 0.05
-    },
-    {
-      "sim": 98.368,
-      "order": 9,
-      "id": "p8",
-      "name": "Бургер красный соус (гот.)",
-      "need": 0.03,
-      "had": 0,
-      "short": 0.03
-    },
-    {
-      "sim": 98.368,
-      "order": 9,
-      "id": "p9",
-      "name": "Бургер белый соус (гот.)",
-      "need": 0.03,
-      "had": 0,
-      "short": 0.03
-    },
-    {
-      "sim": 98.368,
-      "order": 9,
-      "id": "p5",
-      "name": "Шампур куриный (гот.)",
-      "need": 0.1,
-      "had": 0,
-      "short": 0.1
-    },
-    {
-      "sim": 98.368,
-      "order": 9,
-      "id": "p6",
-      "name": "Шампур говяжий (гот.)",
-      "need": 0.1,
-      "had": 0,
-      "short": 0.1
-    },
-    {
-      "sim": 98.368,
-      "order": 9,
-      "id": "p7",
-      "name": "Донер соус (гот.)",
-      "need": 0.05,
-      "had": 0,
-      "short": 0.05
-    },
-    {
-      "sim": 98.368,
-      "order": 9,
-      "id": "p10",
-      "name": "Тесто для блинов (гот.)",
-      "need": 0.1,
-      "had": 0,
-      "short": 0.1
-    },
-    {
-      "sim": 98.368,
-      "order": 9,
-      "id": "p6",
-      "name": "Шампур говяжий (гот.)",
-      "need": 0.08,
-      "had": 0,
-      "short": 0.08
-    },
-    {
-      "sim": 102.873,
-      "order": 10,
-      "id": "p1",
-      "name": "Крылышки маринованные (гот.)",
-      "need": 8,
-      "had": 0,
-      "short": 8
-    },
-    {
-      "sim": 102.873,
-      "order": 10,
-      "id": "p3",
-      "name": "Котлета куриная (гот.)",
-      "need": 1,
-      "had": 0,
-      "short": 1
-    },
-    {
-      "sim": 102.873,
-      "order": 10,
-      "id": "p8",
-      "name": "Бургер красный соус (гот.)",
-      "need": 0.03,
-      "had": 0,
-      "short": 0.03
-    },
-    {
-      "sim": 102.873,
-      "order": 10,
-      "id": "p9",
-      "name": "Бургер белый соус (гот.)",
-      "need": 0.03,
-      "had": 0,
-      "short": 0.03
-    },
-    {
-      "sim": 104.324,
-      "order": 11,
-      "id": "p1",
-      "name": "Крылышки маринованные (гот.)",
-      "need": 20,
-      "had": 0,
-      "short": 20
-    },
-    {
-      "sim": 105.862,
-      "order": 12,
-      "id": "p1",
-      "name": "Крылышки маринованные (гот.)",
-      "need": 2,
-      "had": 0,
-      "short": 2
-    },
-    {
-      "sim": 107.404,
-      "order": 14,
-      "id": "p8",
-      "name": "Бургер красный соус (гот.)",
-      "need": 0.04,
-      "had": 0,
-      "short": 0.04
-    },
-    {
-      "sim": 107.404,
-      "order": 14,
-      "id": "p9",
-      "name": "Бургер белый соус (гот.)",
-      "need": 0.04,
-      "had": 0,
-      "short": 0.04
-    },
-    {
-      "sim": 111.884,
-      "order": 15,
-      "id": "p1",
-      "name": "Крылышки маринованные (гот.)",
-      "need": 30,
-      "had": 0,
-      "short": 30
-    },
-    {
-      "sim": 111.884,
-      "order": 15,
-      "id": "p10",
-      "name": "Тесто для блинов (гот.)",
-      "need": 0.1,
-      "had": 0,
-      "short": 0.1
-    },
-    {
-      "sim": 111.884,
-      "order": 15,
-      "id": "p5",
-      "name": "Шампур куриный (гот.)",
-      "need": 0.08,
-      "had": 0,
-      "short": 0.08
-    },
-    {
-      "sim": 111.884,
-      "order": 15,
-      "id": "p10",
-      "name": "Тесто для блинов (гот.)",
-      "need": 0.1,
-      "had": 0,
-      "short": 0.1
-    },
-    {
-      "sim": 114.904,
-      "order": 16,
-      "id": "p6",
-      "name": "Шампур говяжий (гот.)",
-      "need": 0.2,
-      "had": 0,
-      "short": 0.2
-    },
-    {
-      "sim": 114.904,
-      "order": 16,
-      "id": "p7",
-      "name": "Донер соус (гот.)",
-      "need": 0.05,
-      "had": 0,
-      "short": 0.05
-    },
-    {
-      "sim": 114.904,
-      "order": 16,
-      "id": "p8",
-      "name": "Бургер красный соус (гот.)",
-      "need": 0.03,
-      "had": 0,
-      "short": 0.03
-    },
-    {
-      "sim": 114.904,
-      "order": 16,
-      "id": "p9",
-      "name": "Бургер белый соус (гот.)",
-      "need": 0.03,
-      "had": 0,
-      "short": 0.03
-    },
-    {
-      "sim": 117.933,
-      "order": 17,
-      "id": "p5",
-      "name": "Шампур куриный (гот.)",
-      "need": 0.2,
-      "had": 0,
-      "short": 0.2
-    },
-    {
-      "sim": 117.933,
-      "order": 17,
-      "id": "p7",
-      "name": "Донер соус (гот.)",
-      "need": 0.05,
-      "had": 0,
-      "short": 0.05
-    },
-    {
-      "sim": 119.429,
-      "order": 18,
-      "id": "p2",
-      "name": "Стрипсы маринованные (гот.)",
-      "need": 7,
-      "had": 0,
-      "short": 7
-    },
-    {
-      "sim": 127.035,
-      "order": 20,
-      "id": "p8",
-      "name": "Бургер красный соус (гот.)",
-      "need": 0.03,
-      "had": 0,
-      "short": 0.03
-    },
-    {
-      "sim": 127.035,
-      "order": 20,
-      "id": "p9",
-      "name": "Бургер белый соус (гот.)",
-      "need": 0.03,
-      "had": 0,
-      "short": 0.03
-    },
-    {
-      "sim": 127.159,
-      "order": 19,
-      "id": "p2",
-      "name": "Стрипсы маринованные (гот.)",
-      "need": 20,
-      "had": 0,
-      "short": 20
-    },
-    {
-      "sim": 128.475,
-      "order": 21,
-      "id": "p10",
-      "name": "Тесто для блинов (гот.)",
-      "need": 0.1,
-      "had": 0,
-      "short": 0.1
-    },
-    {
-      "sim": 128.475,
-      "order": 21,
-      "id": "p2",
-      "name": "Стрипсы маринованные (гот.)",
-      "need": 7,
-      "had": 0,
-      "short": 7
-    },
-    {
-      "sim": 128.475,
-      "order": 21,
-      "id": "p2",
-      "name": "Стрипсы маринованные (гот.)",
-      "need": 14,
-      "had": 0,
-      "short": 14
-    },
-    {
-      "sim": 128.475,
-      "order": 22,
-      "id": "p1",
-      "name": "Крылышки маринованные (гот.)",
-      "need": 20,
-      "had": 0,
-      "short": 20
-    },
-    {
-      "sim": 128.475,
-      "order": 22,
-      "id": "p2",
-      "name": "Стрипсы маринованные (гот.)",
-      "need": 14,
-      "had": 0,
-      "short": 14
-    },
-    {
-      "sim": 129.984,
-      "order": 23,
-      "id": "p1",
-      "name": "Крылышки маринованные (гот.)",
-      "need": 30,
-      "had": 0,
-      "short": 30
-    },
-    {
-      "sim": 132.94,
-      "order": 25,
-      "id": "p6",
-      "name": "Шампур говяжий (гот.)",
-      "need": 0.2,
-      "had": 0,
-      "short": 0.2
-    },
-    {
-      "sim": 132.94,
-      "order": 25,
-      "id": "p7",
-      "name": "Донер соус (гот.)",
-      "need": 0.05,
-      "had": 0,
-      "short": 0.05
-    },
-    {
-      "sim": 132.979,
-      "order": 24,
-      "id": "p3",
-      "name": "Котлета куриная (гот.)",
-      "need": 2,
-      "had": 0,
-      "short": 2
-    },
-    {
-      "sim": 132.979,
-      "order": 24,
-      "id": "p8",
-      "name": "Бургер красный соус (гот.)",
-      "need": 0.04,
-      "had": 0,
-      "short": 0.04
-    },
-    {
-      "sim": 132.979,
-      "order": 24,
-      "id": "p9",
-      "name": "Бургер белый соус (гот.)",
-      "need": 0.04,
-      "had": 0,
-      "short": 0.04
-    },
-    {
-      "sim": 132.979,
-      "order": 24,
-      "id": "p1",
-      "name": "Крылышки маринованные (гот.)",
-      "need": 30,
-      "had": 0,
-      "short": 30
-    },
-    {
-      "sim": 132.979,
-      "order": 24,
-      "id": "p5",
-      "name": "Шампур куриный (гот.)",
-      "need": 0.2,
-      "had": 0,
-      "short": 0.2
-    },
-    {
-      "sim": 132.979,
-      "order": 24,
-      "id": "p7",
-      "name": "Донер соус (гот.)",
-      "need": 0.05,
-      "had": 0,
-      "short": 0.05
-    },
-    {
-      "sim": 134.526,
-      "order": 26,
-      "id": "p6",
-      "name": "Шампур говяжий (гот.)",
-      "need": 0.2,
-      "had": 0,
-      "short": 0.2
-    },
-    {
-      "sim": 134.526,
-      "order": 26,
-      "id": "p7",
-      "name": "Донер соус (гот.)",
-      "need": 0.05,
-      "had": 0,
-      "short": 0.05
-    },
-    {
-      "sim": 134.55,
-      "order": 27,
-      "id": "p8",
-      "name": "Бургер красный соус (гот.)",
-      "need": 0.03,
-      "had": 0,
-      "short": 0.03
-    },
-    {
-      "sim": 134.55,
-      "order": 27,
-      "id": "p9",
-      "name": "Бургер белый соус (гот.)",
-      "need": 0.03,
-      "had": 0,
-      "short": 0.03
-    },
-    {
-      "sim": 142.065,
-      "order": 30,
-      "id": "p1",
-      "name": "Крылышки маринованные (гот.)",
-      "need": 30,
-      "had": 0,
-      "short": 30
-    },
-    {
-      "sim": 145.012,
-      "order": 31,
-      "id": "p8",
-      "name": "Бургер красный соус (гот.)",
-      "need": 0.03,
-      "had": 0,
-      "short": 0.03
-    },
-    {
-      "sim": 145.012,
-      "order": 31,
-      "id": "p9",
-      "name": "Бургер белый соус (гот.)",
-      "need": 0.03,
-      "had": 0,
-      "short": 0.03
-    },
-    {
-      "sim": 145.012,
-      "order": 31,
-      "id": "p10",
-      "name": "Тесто для блинов (гот.)",
-      "need": 0.1,
-      "had": 0,
-      "short": 0.1
-    },
-    {
-      "sim": 146.525,
-      "order": 32,
-      "id": "p5",
-      "name": "Шампур куриный (гот.)",
-      "need": 0.2,
-      "had": 0,
-      "short": 0.2
-    },
-    {
-      "sim": 146.525,
-      "order": 32,
-      "id": "p7",
-      "name": "Донер соус (гот.)",
-      "need": 0.05,
-      "had": 0,
-      "short": 0.05
-    },
-    {
-      "sim": 146.525,
-      "order": 32,
-      "id": "ready_s14",
-      "name": "Фри",
-      "need": 1,
-      "had": 0.75,
-      "short": 0.25
-    },
-    {
-      "sim": 146.525,
-      "order": 32,
-      "id": "p10",
-      "name": "Тесто для блинов (гот.)",
-      "need": 0.1,
-      "had": 0,
-      "short": 0.1
-    },
-    {
-      "sim": 146.525,
-      "order": 32,
-      "id": "p6",
-      "name": "Шампур говяжий (гот.)",
-      "need": 0.08,
-      "had": 0,
-      "short": 0.08
-    },
-    {
-      "sim": 146.525,
-      "order": 32,
-      "id": "p1",
-      "name": "Крылышки маринованные (гот.)",
-      "need": 30,
-      "had": 0,
-      "short": 30
-    },
-    {
-      "sim": 148.045,
-      "order": 33,
-      "id": "p1",
-      "name": "Крылышки маринованные (гот.)",
-      "need": 20,
-      "had": 0,
-      "short": 20
-    },
-    {
-      "sim": 148.045,
-      "order": 33,
-      "id": "p2",
-      "name": "Стрипсы маринованные (гот.)",
-      "need": 14,
-      "had": 0,
-      "short": 14
-    },
-    {
-      "sim": 149.598,
-      "order": 34,
-      "id": "p3",
-      "name": "Котлета куриная (гот.)",
-      "need": 2,
-      "had": 0,
-      "short": 2
-    },
-    {
-      "sim": 149.598,
-      "order": 34,
-      "id": "p8",
-      "name": "Бургер красный соус (гот.)",
-      "need": 0.04,
-      "had": 0,
-      "short": 0.04
-    },
-    {
-      "sim": 149.598,
-      "order": 34,
-      "id": "p9",
-      "name": "Бургер белый соус (гот.)",
-      "need": 0.04,
-      "had": 0,
-      "short": 0.04
-    },
-    {
-      "sim": 152.596,
-      "order": 36,
-      "id": "p3",
-      "name": "Котлета куриная (гот.)",
-      "need": 1,
-      "had": 0,
-      "short": 1
-    },
-    {
-      "sim": 152.596,
-      "order": 36,
-      "id": "p1",
-      "name": "Крылышки маринованные (гот.)",
-      "need": 8,
-      "had": 0,
-      "short": 8
-    },
-    {
-      "sim": 152.596,
-      "order": 36,
-      "id": "ready_s14",
-      "name": "Фри",
-      "need": 1,
-      "had": 0,
-      "short": 1
-    },
-    {
-      "sim": 152.596,
-      "order": 36,
-      "id": "p8",
-      "name": "Бургер красный соус (гот.)",
-      "need": 0.03,
-      "had": 0,
-      "short": 0.03
-    },
-    {
-      "sim": 152.596,
-      "order": 36,
-      "id": "p9",
-      "name": "Бургер белый соус (гот.)",
-      "need": 0.03,
-      "had": 0,
-      "short": 0.03
-    },
-    {
-      "sim": 152.813,
-      "order": 35,
-      "id": "p3",
-      "name": "Котлета куриная (гот.)",
-      "need": 1,
-      "had": 0,
-      "short": 1
-    },
-    {
-      "sim": 152.813,
-      "order": 35,
-      "id": "p1",
-      "name": "Крылышки маринованные (гот.)",
-      "need": 8,
-      "had": 0,
-      "short": 8
-    },
-    {
-      "sim": 152.813,
-      "order": 35,
-      "id": "ready_s14",
-      "name": "Фри",
-      "need": 1,
-      "had": 0,
-      "short": 1
-    },
-    {
-      "sim": 154.076,
-      "order": 37,
-      "id": "p10",
-      "name": "Тесто для блинов (гот.)",
-      "need": 0.1,
-      "had": 0,
-      "short": 0.1
-    },
-    {
-      "sim": 155.572,
-      "order": 38,
-      "id": "p5",
-      "name": "Шампур куриный (гот.)",
-      "need": 0.2,
-      "had": 0,
-      "short": 0.2
-    },
-    {
-      "sim": 155.572,
-      "order": 38,
-      "id": "p7",
-      "name": "Донер соус (гот.)",
-      "need": 0.05,
-      "had": 0,
-      "short": 0.05
-    },
-    {
-      "sim": 157.082,
-      "order": 40,
-      "id": "p10",
-      "name": "Тесто для блинов (гот.)",
-      "need": 0.1,
-      "had": 0,
-      "short": 0.1
-    }
-  ],
-  "consumption": [
-    {
-      "key": "s:r24",
-      "measured": 2.92,
-      "journalNet": -3.52,
-      "expected": 3.52,
-      "mismatch": true
-    },
-    {
-      "key": "s:r27",
-      "measured": 1,
-      "journalNet": -67,
-      "expected": 67,
-      "mismatch": true
-    },
-    {
-      "key": "s:r28",
-      "measured": 0,
-      "journalNet": -54,
-      "expected": 54,
-      "mismatch": true
-    },
-    {
-      "key": "s:r29",
-      "measured": 0,
-      "journalNet": -58,
-      "expected": 58,
-      "mismatch": true
-    },
-    {
-      "key": "s:r34",
-      "measured": 21,
-      "journalNet": -51,
-      "expected": 51,
-      "mismatch": true
-    },
-    {
-      "key": "s:r35",
-      "measured": 0,
-      "journalNet": -6.84,
-      "expected": 6.84,
-      "mismatch": true
-    },
-    {
-      "key": "s:r36",
-      "measured": 0.2,
-      "journalNet": -2.6,
-      "expected": 2.6,
-      "mismatch": true
-    },
-    {
-      "key": "pf:p4|workshop",
-      "measured": 0,
-      "journalNet": -48,
-      "produced": 0,
-      "expected": 48,
-      "mismatch": true
-    }
-  ],
-  "reconciliation": {
-    "mismatches": [
+  "pool": {
+    "producedPortions": 105,
+    "producedKg": 21,
+    "producedServer": 105,
+    "cookBatches": 7,
+    "cookRejected400": 0,
+    "cookRejected400Sample": [],
+    "cookServer500": 0,
+    "cookServer500Sample": [],
+    "readyShortOrders": 0,
+    "shortagesTotal": 0,
+    "minPool": 0,
+    "poolMinSim": 301.3,
+    "poolSamples": [
       {
-        "key": "s:r24",
-        "measured": 2.92,
-        "journalNet": -3.52,
-        "expected": 3.52,
-        "mismatch": true
+        "sim": 301.3,
+        "pool": 0
       },
       {
-        "key": "s:r27",
-        "measured": 1,
-        "journalNet": -67,
-        "expected": 67,
-        "mismatch": true
+        "sim": 1810.4,
+        "pool": 86.75
       },
       {
-        "key": "s:r28",
-        "measured": 0,
-        "journalNet": -54,
-        "expected": 54,
-        "mismatch": true
+        "sim": 3318.7,
+        "pool": 52.25
       },
       {
-        "key": "s:r29",
-        "measured": 0,
-        "journalNet": -58,
-        "expected": 58,
-        "mismatch": true
+        "sim": 4824.6,
+        "pool": 50.25
       },
       {
-        "key": "s:r34",
-        "measured": 21,
-        "journalNet": -51,
-        "expected": 51,
-        "mismatch": true
+        "sim": 6330.8,
+        "pool": 50.25
       },
       {
-        "key": "s:r35",
-        "measured": 0,
-        "journalNet": -6.84,
-        "expected": 6.84,
-        "mismatch": true
-      },
-      {
-        "key": "s:r36",
-        "measured": 0.2,
-        "journalNet": -2.6,
-        "expected": 2.6,
-        "mismatch": true
-      },
-      {
-        "key": "pf:p4|workshop",
-        "measured": 0,
-        "journalNet": -48,
-        "produced": 0,
-        "expected": 48,
-        "mismatch": true
+        "sim": 7841.1,
+        "pool": 20.25
       }
-    ],
+    ]
+  },
+  "shortages": [],
+  "consumption": [],
+  "reconciliation": {
+    "mismatches": [],
     "ready_s14": {
-      "produced": 0,
-      "producedServer": 0,
-      "consumedNeed": 84,
-      "consumedShort": 68.75,
-      "consumedActual": 15.25,
-      "measuredDelta": 4.5,
-      "formula": "produced - consumedActual == -measuredDelta",
-      "check": false
+      "produced": 105,
+      "producedServer": 105,
+      "consumedNeed": 90.25,
+      "consumedShort": 0,
+      "consumedActual": 90.25,
+      "consumedJournal": 90.25,
+      "planVsJournal": 0,
+      "statusDoneFailed": 0,
+      "measuredDelta": -14.75,
+      "formula": "produced(server cook_log) - consumedJournal == -measuredDelta (сходимость журнала и остатка)",
+      "check": true
     },
-    "ready_s14FormulaOk": false,
-    "journalTotalItems": 49
+    "ready_s14FormulaOk": true,
+    "journalTotalItems": 48
   },
   "restore": {
-    "backup1": "yaya_orders_backup_1786229143401",
-    "backup2": "yaya_orders_backup_1786229616871",
-    "residualDiffs": []
+    "backup1": "yaya_orders_backup_1786259915965",
+    "backup2": "yaya_orders_backup_1786260012408",
+    "residualDiffs": [],
+    "seededPfAfterRestore": [
+      {
+        "id": "p1",
+        "kitchen": 0,
+        "workshop": 0
+      },
+      {
+        "id": "p5",
+        "kitchen": 0.04,
+        "workshop": 0.04
+      },
+      {
+        "id": "p7",
+        "kitchen": 3,
+        "workshop": 3
+      },
+      {
+        "id": "p3",
+        "kitchen": 0,
+        "workshop": 0
+      },
+      {
+        "id": "p8",
+        "kitchen": 0,
+        "workshop": 0
+      },
+      {
+        "id": "p9",
+        "kitchen": 0,
+        "workshop": 0
+      },
+      {
+        "id": "p2",
+        "kitchen": 38,
+        "workshop": 38
+      },
+      {
+        "id": "p6",
+        "kitchen": 0.84,
+        "workshop": 0.84
+      },
+      {
+        "id": "p10",
+        "kitchen": 0,
+        "workshop": 0
+      }
+    ]
   },
   "whereItBreaks": [
-    "Потолок создания заказов: POST /order 20/мин на IP → 58 × 429; effective 1367.1/мин vs offered 25/мин (создание заняло 431.6с).",
-    "Недостача пула ready_s14: 68.75 порций (shortage на заказах), минимум спроса vs производства.",
-    "Готовка упирается в сырьё: POST /cook 400 × 108 — r31 кончается, потолок ≈ 0 кг.",
-    "Расхождение журнал↔остаток по 8 позициям (напр. s:r24, s:r27, s:r28, s:r29, s:r34) — при нулевом остатке applyTechCard пишет полное списание, остаток клипится на 0.",
-    "НЕДОСТАЧА ПФ в кафе × 468 — блюда едят ПФ (p1..p10), которых нет в pf_stock kitchen (готовят в цеху): заказ проходит, пул не пополняется.",
-    "Формула ready_s14 (произведено − потреблено == Δ) НЕ сошлась."
+    "Потолок создания заказов: POST /order 20/мин на IP → 114 × 429; effective 7200/мин vs offered 25/мин (создание заняло 73.8с)."
   ]
 }

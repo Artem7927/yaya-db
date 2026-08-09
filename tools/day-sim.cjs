@@ -11,25 +11,34 @@
  *
  * Запуск:  node tools/day-sim.cjs   (SPEED=1 → день ≈ 7.2 мин)
  *          node tools/day-sim.cjs 2 (ускорить вдвое)
+ *          node tools/day-sim.cjs --seed-opening
+ *            (посев реалистичного открытия под собственный план заказов:
+ *             спрос×1.5 по задействованным позициям stock + кухонные ПФ;
+ *             ready_s14 стартует 0 — его наполняет готовка по ходу дня)
  */
 'use strict';
 const fs = require('fs');
 const path = require('path');
 
+const SEED_OPENING = process.argv.includes('--seed-opening');
+
 // ═══════════════ КОНФИГ (все параметры настраиваемые) ═══════════════
 const CFG = {
   YAYA_API: process.env.YAYA_API || 'https://yaya-db-production.up.railway.app',
-  SPEED: Number(process.env.SPEED || process.argv[2] || 1), // множитель скорости (1 = ~7.2 мин на день)
+  SPEED: Number(process.env.SPEED || (process.argv.find(a => /^\d+(\.\d+)?$/.test(a))) || 1), // множитель скорости (1 = ~7.2 мин на день)
   COMPRESS: 100,                                            // сжатие реального времени (12ч → 432с)
   DAY_START_H: Number(process.env.DAY_START || 10), DAY_END_H: Number(process.env.DAY_END || 22),
   ORDERS: Number(process.env.ORDERS || 180),
+  SEED_BUFFER: 1.5,                                         // открытие = спрос × буфер (режим --seed-opening)
   BASKET_MIN: 1, BASKET_MAX: 3,
   FRIES_SHARE: 0.18,                                        // доля заказов, содержащих фри-блюдо
   CANCEL_SHARE: 0.06,                                       // доля заказов done→cancel (проверка возврата)
   ACCEPT_MIN: 5, COOK_MIN: 40,                              // реальные минуты: new→cook, cook→done
   MAX_INFLIGHT_ORDERS: 15,                                  // одновременно «в работе» созданий
+  MAX_INFLIGHT_STATUS: 4,                                   // потолок одновременных смен статуса (нагрузка на БД)
   TICK_MS: 1500,
   TIMEOUT_MS: 20000,
+  DEBUG_COOK: !!process.env.DEBUG_COOK,
   MAX_WALL_MIN: 45,                                         // стоп-кран всего прогона
   RESET_START_NUM: 1,
   // готовка наперёд (пул ready_s14)
@@ -37,9 +46,10 @@ const CFG = {
   POOL_BUFFER: 12,                                          // порций буфера
   POOL_LOOKAHEAD_MIN: 45,                                   // горизонт прогноза спроса (реальные минуты)
   COOK_BATCH: 20,                                           // порций за один POST /cook
-  POOL_REFRESH_MS: 4000,                                    // обновление кэша пула
-  COOK_MIN_GAP_MS: 3000,                                    // пауза между батчами готовки
+  POOL_REFRESH_MS: 1200,                                    // обновление кэша пула (≈ каждый тик)
+  COOK_MIN_GAP_MS: 1000,                                    // пауза между батчами готовки
   R31_PER_PORTION: 0.2,                                     // кг r31 на 1 порцию фри
+  R31_MARGIN_KG: 0.05,                                      // страховой остаток r31 (готовка не съедает всё сырьё)
   REPORT_FILE: path.join(__dirname, 'day-sim-report.json'),
 };
 
@@ -60,6 +70,7 @@ const EP = {
   GET_COOKREC: 'GET /cook-recipes',
   PATCH_STOCK: 'PATCH /stock/:id',
   PATCH_PF: 'PATCH /pf-stock/:id',
+  POST_TRANSFER: 'POST /transfer',
   RESET: 'POST /admin/reset-orders',
 };
 const lat = {}, errTypes = {};
@@ -132,12 +143,15 @@ const stats = {
   created: 0, done: 0, cancel: 0, leftover: 0,
   order429: [], order429Count: 0,
   cookBatches: 0, producedPortions: 0, producedKg: 0,
-  cookRejected400: [], readyShortOrders: 0,
+  cookRejected400: [], readyShortOrders: 0, statusDoneFailed: 0,
+  cookServer500: [],
+  statusFail: { done: {}, cook: {}, cancel: {} }, // код → счётчик
   shortages: [], // {sim, order, id, name, need, had, short}
   concurrencySamples: [], concurrencyPeak: 0, concurrencyPeakSim: 0,
   creationWallMs: 0,
   byStatusServer: null,
-  ordersByHour: {}, 
+  ordersByHour: {},
+  poolSamples: [], // {sim, pool} — динамика пула ready_s14 по времени
 };
 let liveOrders = new Set();
 let startWall = 0;
@@ -151,6 +165,12 @@ function scheduleEvent(atSec, fn) { events.push({ at: atSec, fn }); events.sort(
 
 // ═══════════════ Жизненный цикл заказа ═══════════════
 let inflightCreate = 0;
+let inflightStatus = 0;
+async function withStatusCap(fn) {
+  while (inflightStatus >= CFG.MAX_INFLIGHT_STATUS) await sleep(250);
+  inflightStatus++;
+  try { return await fn(); } finally { inflightStatus--; }
+}
 async function createOrder(ord) {
   while (inflightCreate >= CFG.MAX_INFLIGHT_ORDERS) await sleep(250);
   inflightCreate++;
@@ -183,16 +203,22 @@ async function runOrder(ord) {
   } catch (e) { console.error('[order]', ord.num, String(e)); stats.leftover++; liveOrders.delete(ord.token); }
 }
 async function stepCook(ord) {
-  try {
-    const r = await call('POST', '/orders/' + ord.id + '/status', EP.POST_STATUS, { status: 'cook' });
-    if (r.status !== 200 && r.status !== 400) { /* повтор не делаем — шаг дальше */ }
-  } catch (e) { console.error('[stepCook]', ord.num, String(e)); }
+  let r = null;
+  for (let a = 1; a <= 5 && !(r && r.status === 200 && r.body); a++) {
+    r = await withStatusCap(() => call('POST', '/orders/' + ord.id + '/status', EP.POST_STATUS, { status: 'cook' }));
+    if (!(r && r.status === 200 && r.body) && a < 5) await sleep(400 * a + Math.random() * 300);
+  }
+  if (!(r && r.status === 200 && r.body)) stats.statusFail.cook[r && r.status] = (stats.statusFail.cook[r && r.status] || 0) + 1;
   scheduleEvent(simNow() + CFG.COOK_MIN * 60 / CFG.COMPRESS, () => stepFinal(ord));
 }
 async function stepFinal(ord) {
   const cancel = Math.random() < CFG.CANCEL_SHARE;
   let r1 = null;
-  try { r1 = await call('POST', '/orders/' + ord.id + '/status', EP.POST_STATUS, { status: 'done' }); } catch (e) { console.error('[stepFinal]', ord.num, String(e)); }
+  for (let a = 1; a <= 5 && !(r1 && r1.status === 200 && r1.body); a++) {
+    r1 = await withStatusCap(() => call('POST', '/orders/' + ord.id + '/status', EP.POST_STATUS, { status: 'done' }));
+    if (!(r1 && r1.status === 200 && r1.body) && a < 5) await sleep(400 * a + Math.random() * 300);
+  }
+  if (!(r1 && r1.status === 200 && r1.body)) { stats.statusDoneFailed++; stats.statusFail.done[r1 && r1.status] = (stats.statusFail.done[r1 && r1.status] || 0) + 1; }
   if (r1 && r1.status === 200 && r1.body) {
     const shorts = (r1.body.shortage || []).filter(s => s && s.id);
     ord.doneShorts = shorts;
@@ -200,12 +226,16 @@ async function stepFinal(ord) {
       stats.shortages.push({ sim: round(simNow()), order: ord.num, id: s.id, name: s.name, need: s.need, had: s.had, short: s.short });
       if (s.id === CFG.POOL_ID) stats.readyShortOrders++;
     }
+    consumedFries += (ord.items || []).reduce((s, it) => s + (friesQty[it.id] || 0) * it.qty, 0);
   }
   if (cancel) {
-    try {
-      const r2 = await call('POST', '/orders/' + ord.id + '/status', EP.POST_STATUS, { status: 'cancel' });
-      if (r2.status === 200 && r2.body && r2.body.ok) stats.cancel++;
-    } catch (e) { console.error('[stepFinal]', ord.num, String(e)); }
+    let r2 = null;
+    for (let a = 1; a <= 5 && !(r2 && r2.status === 200 && r2.body && r2.body.ok); a++) {
+      r2 = await withStatusCap(() => call('POST', '/orders/' + ord.id + '/status', EP.POST_STATUS, { status: 'cancel' }));
+      if (!(r2 && r2.status === 200 && r2.body && r2.body.ok) && a < 5) await sleep(400 * a + Math.random() * 300);
+    }
+    if (!(r2 && r2.status === 200 && r2.body && r2.body.ok)) stats.statusFail.cancel[r2 && r2.status] = (stats.statusFail.cancel[r2 && r2.status] || 0) + 1;
+    if (r2 && r2.status === 200 && r2.body && r2.body.ok) stats.cancel++;
     ord.final = 'cancel';
   } else {
     ord.final = 'done';
@@ -216,42 +246,46 @@ async function stepFinal(ord) {
 
 // ═══════════════ Готовка наперёд (пул ready_s14) ═══════════════
 let pool = null, poolAt = 0, r31 = null, r31At = 0, lastCook = 0;
-let friesCum = []; // [{at, cum}] — накопленный фри-спрос планируемых заказов
-function friesCumAt(t) {
-  if (!friesCum.length) return 0;
-  if (t <= friesCum[0].at) return 0;
-  for (let i = friesCum.length - 1; i >= 0; i--) if (friesCum[i].at <= t) return friesCum[i].cum;
-  return 0;
-}
+let allArrivals = [];
+let plannedFries = 0, consumedFries = 0;
 async function cookAhead(now) {
-  if (now >= DURATION_S + 10) return;
+  if (allArrivals.length === 0 && liveOrders.size === 0) return; // всё обслужено — готовку сворачиваем
   if (Date.now() - poolAt > CFG.POOL_REFRESH_MS) {
     poolAt = Date.now();
     const pf = await pfSnap();
     pool = pf.ok ? pf.snap.qty(CFG.POOL_ID, 'kitchen') : pool;
     if (pool == null) pool = 0;
   }
-  if (Date.now() - r31At > 10000) {
+  if (Date.now() - r31At > CFG.POOL_REFRESH_MS) {
     r31At = Date.now();
     const s = await stockSnap();
     r31 = s.ok ? s.snap.qty('r31') : r31;
   }
-  const horizon = Math.min(now + CFG.POOL_LOOKAHEAD_MIN * 60 / CFG.COMPRESS, DURATION_S);
-  const target = (friesCumAt(horizon) - friesCumAt(now)) + CFG.POOL_BUFFER;
+  // цель = необслуженный фри-спрос (planned − уже съеденное) + буфер.
+  // По прибытиям целиться нельзя: при 429-торможении создание растягивается,
+  // и готовка обязана идти, пока жив хоть один заказ.
+  const target = (plannedFries - consumedFries) + CFG.POOL_BUFFER;
   const missing = target - pool;
+  if (CFG.DEBUG_COOK && missing > 0.5) console.log('[cookdbg]', round(now, 0) + 'с', 'pool:', round(pool, 2), 'target:', round(target, 2), 'missing:', round(missing, 2), 'r31:', r31, 'cap:', r31 != null ? Math.max(0, Math.floor((r31 - CFG.R31_MARGIN_KG) / CFG.R31_PER_PORTION)) : 'inf', 'gap_ok:', Date.now() - lastCook >= CFG.COOK_MIN_GAP_MS);
   if (missing > 0.5 && Date.now() - lastCook >= CFG.COOK_MIN_GAP_MS) {
-    const cap = r31 != null ? Math.floor((r31 + 1e-9) / CFG.R31_PER_PORTION) : Infinity;
-    const qty = Math.max(1, Math.min(missing, CFG.COOK_BATCH, cap));
+    // страховой остаток: не добираемся до последних 0.05 кг r31 (заодно обходит
+    // float-край `0.2*N > stored qty` в POST /cook, дающий ложный 400 на полном остатке)
+    const cap = r31 != null ? Math.max(0, Math.floor((r31 - CFG.R31_MARGIN_KG) / CFG.R31_PER_PORTION)) : Infinity;
+    // целые порции: сервер 500-ит дробный qty (cook_log.qty INT), а порция фри бывает 0.75 — округляем вверх
+    const qty = Math.max(1, Math.min(Math.ceil(missing), CFG.COOK_BATCH, cap));
     if (qty >= 1) {
       lastCook = Date.now();
       const r = await call('POST', '/cook', EP.POST_COOK, { dishId: 's14', qty, name: 'Фри', emoji: '🍟' });
+      if (CFG.DEBUG_COOK) console.log('[cookdbg]  --> POST /cook qty', qty, 'status', r.status, 'ready:', r.body && r.body.ready);
       if (r.status === 200 && r.body && r.body.ok) {
         stats.cookBatches++; stats.producedPortions += qty; stats.producedKg += round(qty * CFG.R31_PER_PORTION, 4);
         pool = Number(r.body.ready); poolAt = Date.now();
       } else if (r.status === 400) {
         stats.cookRejected400.push({ sim: round(now), qty, err: r.body && r.body.error });
+      } else if (r.status >= 500) {
+        stats.cookServer500.push({ sim: round(now), qty, err: r.body && r.body.error, status: r.status });
       }
-    }
+    } else if (CFG.DEBUG_COOK) console.log('[cookdbg]  --> НЕ готовим: cap', cap, 'qty', qty);
   }
 }
 
@@ -275,7 +309,57 @@ function percentileReport() {
   }
   return out;
 }
-async function reconcile(snapStock, snapPf, finalOrders, cookLogBefore) {
+// ═══════════════ Посев открытия дня (--seed-opening) ═══════════════
+// Открытие = Σ техкарта(item)×qty по запланированным заказам + спрос готовки
+// пула на сырьё (порции ready_s14 × R31_PER_PORTION кг r31), всё × SEED_BUFFER.
+// Снапшот берётся ДО посева; восстановление возвращает к снапшоту.
+// r31/прочее сырьё — PATCH /stock/:id; кухонные ПФ p* — PATCH + /transfer
+// (единственный публичный способ создать строку pf_stock(location='kitchen')).
+async function seedOpening(baskets, tc, sSnap, pSnap, plannedFries) {
+  const demand = {};
+  const add = (id, q) => { if (id && Number.isFinite(q) && q > 0) demand[id] = (demand[id] || 0) + q; };
+  for (const b of baskets) {
+    for (const it of b.items) {
+      const rows = tc[it.id] || [];
+      for (const r of rows) add(r.ingId, Number(r.qty) * it.qty);
+    }
+  }
+  add('r31', plannedFries * CFG.R31_PER_PORTION); // спрос готовки пула на сырьё фри
+
+  const pfIds = new Set(Object.keys(pSnap.snap.snap).map(k => k.split('|')[0]));
+  const seeded = { demand, stock: [], pf: [], poolZeroed: false };
+
+  for (const id of Object.keys(demand)) {
+    const want = round(demand[id] * CFG.SEED_BUFFER, 2);
+    if (want <= 0) continue;
+    if (id in sSnap.snap.snap) {
+      const r = await call('PATCH', '/stock/' + encodeURIComponent(id), EP.PATCH_STOCK, { qty: want, reason: 'Корректировка' });
+      seeded.stock.push({ id, demand: round(demand[id], 2), seeded: want, ok: r.status === 200 });
+    }
+  }
+
+  for (const id of Object.keys(demand)) {
+    if (!pfIds.has(id) || id === CFG.POOL_ID) continue;
+    const want = round(demand[id] * CFG.SEED_BUFFER, 2);
+    if (want <= 0) continue;
+    const kitchenQty = pSnap.snap.qty(id, 'kitchen');
+    if (kitchenQty != null && kitchenQty >= want) { seeded.pf.push({ id, want, mode: 'skip-enough' }); continue; }
+    if (kitchenQty != null) {
+      const r = await call('PATCH', '/pf-stock/' + encodeURIComponent(id), EP.PATCH_PF, { qty: want });
+      seeded.pf.push({ id, want, mode: 'patch', ok: r.status === 200 });
+    } else {
+      const r1 = await call('PATCH', '/pf-stock/' + encodeURIComponent(id), EP.PATCH_PF, { qty: want });
+      const r2 = await call('POST', '/transfer', EP.POST_TRANSFER, { dir: 'ws-ks', fromId: id, qty: want });
+      seeded.pf.push({ id, want, mode: 'transfer', ok: r1.status === 200 && r2.status === 200 });
+    }
+  }
+
+  const r0 = await call('PATCH', '/pf-stock/' + encodeURIComponent(CFG.POOL_ID), EP.PATCH_PF, { qty: 0 });
+  seeded.poolZeroed = r0.status === 200;
+  return seeded;
+}
+
+async function reconcile(snapStock, snapPf, finalOrders, cookLogBefore, seedMode) {
   // cook_log diff → произведено порций (server-side факт)
   const cl = await call('GET', '/cook-log', EP.GET_COOKLOG);
   let cookLogAfterSum = 0, cookLogBeforeSum = 0;
@@ -287,7 +371,7 @@ async function reconcile(snapStock, snapPf, finalOrders, cookLogBefore) {
   // deductions журнал
   const dd = await call('GET', '/deductions', EP.GET_DEDUCTIONS);
   const ded = (dd.body && dd.body.items) || [];
-  const ignoreReasons = s => /НЕДОСТАЧА|Корректировка|Инвентаризация/.test(s);
+  const ignoreReasons = s => /НЕДОСТАЧА|Корректировка|Инвентаризация/.test(s) || (seedMode && /Передача/.test(s));
   const journal = {}; // name → сумма qty
   for (const d of ded) {
     if (ignoreReasons(d.reason || '')) continue;
@@ -309,7 +393,7 @@ async function reconcile(snapStock, snapPf, finalOrders, cookLogBefore) {
   for (const i of rawP) addName(i.name, 'pf:' + i.id + ':' + (i.location || 'workshop'));
 
   const mismatches = [], okCount = 0, detail = [];
-  const producedForKey = k => (k === 'pf:ready_s14:kitchen' ? stats.producedPortions : 0);
+  const producedForKey = k => (k === 'ready_s14|kitchen' ? producedServer : 0);
 
   // по stock
   for (const id of Object.keys(snapStock.snap.snap)) {
@@ -322,9 +406,11 @@ async function reconcile(snapStock, snapPf, finalOrders, cookLogBefore) {
     if (Math.abs(expected - measured) > 1e-6) { row.mismatch = true; mismatches.push(row); } else row.ok = true;
     detail.push(row);
   }
-  // по pf (id+loc)
+  // по pf (id+loc) — только kitchen: сим не трогает workshop, а журнал по имени
+  // не различает локации (много-локационные id давали ложный mismatch workshop)
   for (const k of Object.keys(snapPf.snap.snap)) {
     const [id, loc] = k.split('|');
+    if (loc !== 'kitchen') continue;
     const cur = curP.ok ? (curP.snap.snap[k] != null ? curP.snap.snap[k] : 0) : null;
     if (cur == null) continue;
     const measured = Number(snapPf.snap.snap[k]) - cur;
@@ -347,12 +433,18 @@ async function reconcile(snapStock, snapPf, finalOrders, cookLogBefore) {
   const consumedActual = consumedNeed - consumedShort;
   const curReady = curP.ok ? (curP.snap.snap['ready_s14|kitchen'] != null ? curP.snap.snap['ready_s14|kitchen'] : 0) : null;
   const measuredReady = Number(snapPf.snap.snap['ready_s14|kitchen'] || 0) - (curReady || 0);
+  // истинное потребление — из журнала списаний (симуляция могла «договорить» done,
+  // не дождавшись ответа сервера — тогда сервер не списал и пул завышен)
+  const consumedJournal = -((journal[nameKeyPf(rawP, 'ready_s14', 'kitchen')] || 0));
+  const planVsJournal = round(consumedActual - consumedJournal, 4);
   const readyRow = {
     produced: stats.producedPortions, producedServer,
     consumedNeed, consumedShort, consumedActual,
+    consumedJournal: round(consumedJournal, 4), planVsJournal,
+    statusDoneFailed: stats.statusDoneFailed,
     measuredDelta: round(measuredReady, 4),
-    formula: 'produced - consumedActual == -measuredDelta',
-    check: Math.abs((stats.producedPortions - consumedActual) + measuredReady) < 1e-6,
+    formula: 'produced(server cook_log) - consumedJournal == -measuredDelta (сходимость журнала и остатка)',
+    check: Math.abs((producedServer - consumedJournal) + measuredReady) < 1e-6,
   };
 
   return { detail, mismatches, readyRow, producedServer, okCount };
@@ -416,8 +508,7 @@ function nameKeyPf(items, id, loc) {
       final: null, num: null, id: null, doneShorts: [],
     });
   });
-  const plannedFries = baskets.reduce((s, b) => s + b.items.reduce((x, it) => x + (friesQty[it.id] || 0) * it.qty, 0), 0);
-  let cum = 0; friesCum = baskets.map(b => { cum += b.items.reduce((x, it) => x + (friesQty[it.id] || 0) * it.qty, 0); return { at: b.atSim, cum }; });
+  plannedFries = baskets.reduce((s, b) => s + b.items.reduce((x, it) => x + (friesQty[it.id] || 0) * it.qty, 0), 0);
 
   console.log('[day-sim] день', (CFG.DAY_END_H - CFG.DAY_START_H) + 'ч →', round(DURATION_S, 0) + 'с (SPEED=' + CFG.SPEED + ') | заказов:', CFG.ORDERS,
     '| блюд с техкартой:', dishes.length, '| фри-пул:', friesPool.length, '| фри-порций запланировано:', round(plannedFries, 1), '| сервис-время на заказ (sim):', delaySim() + 'с');
@@ -428,16 +519,28 @@ function nameKeyPf(items, id, loc) {
   const backup1 = r1.body.backup_key;
   console.log('[reset] бэкап #1:', backup1, '| очищено:', JSON.stringify(r1.body.cleared));
 
-  // ── 2. снапшот ──
+  // ── 2. снапшот (ДО посева) ──
   const sSnap = await stockSnap(), pSnap = await pfSnap();
   const cookLogBeforeR = await call('GET', '/cook-log', EP.GET_COOKLOG);
   const cookLogBefore = cookLogBeforeR.body && cookLogBeforeR.body.items;
   console.log('[snapshot] stock:', Object.keys(sSnap.snap.snap).length, '| pf:', Object.keys(pSnap.snap.snap).length);
 
+  // ── 2b. посев открытия (--seed-opening): спрос×буфер по задействованным позициям ──
+  let seedRes = null;
+  if (SEED_OPENING) {
+    seedRes = await seedOpening(baskets, tc, sSnap, pSnap, plannedFries);
+    console.log('[seed] stock позиций:', seedRes.stock.length, '| pf:', JSON.stringify(seedRes.pf.map(p => p.id + ':' + p.want + '(' + p.mode + ')')), '| pool→0:', seedRes.poolZeroed);
+  }
+
+  // ── 2c. снапшот ПОСЛЕ посева — база сходимости (измеряем Δ от фактического старта) ──
+  const sSeed = SEED_OPENING ? await stockSnap() : sSnap;
+  const pSeed = SEED_OPENING ? await pfSnap() : pSnap;
+  console.log('[baseline] stock:', Object.keys(sSeed.snap.snap).length, '| pf kitchen:', Object.keys(pSeed.snap.snap).filter(k => k.endsWith('|kitchen')).length);
+
   // ── 3. прогон ──
   startWall = Date.now();
   console.log('[sim] старт', ts(), '| DURATION_S =', DURATION_S);
-  let allArrivals = baskets.slice();
+  allArrivals = baskets.slice();
   const pump = setInterval(() => {
     try {
       pumpTick();
@@ -457,6 +560,7 @@ function nameKeyPf(items, id, loc) {
     }
     cookAhead(now).catch(e => console.error('[cookAhead]', String(e)));
     sampleConcurrency(now);
+    if (pool != null) stats.poolSamples.push({ sim: round(now, 1), pool: round(pool, 2) });
     if (!lastTickPrint || now - lastTickPrint > 60) {
       lastTickPrint = now;
       console.log('[tick]', round(now, 0) + 'с', '| arrivals left:', allArrivals.length, '| events:', events.length, '| inflight:', inflightCreate, '| live orders:', liveOrders.size, '| done:', stats.done, 'cancel:', stats.cancel, 'leftover:', stats.leftover);
@@ -486,8 +590,9 @@ function nameKeyPf(items, id, loc) {
   const byStatus = { new: 0, cook: 0, done: 0, cancel: 0 };
   for (const o of serverOrders) byStatus[o.status] = (byStatus[o.status] || 0) + 1;
   stats.byStatusServer = byStatus;
+  console.log('[status-fail] done:', JSON.stringify(stats.statusFail.done), '| cook:', JSON.stringify(stats.statusFail.cook), '| cancel:', JSON.stringify(stats.statusFail.cancel));
   const finalOrders = baskets.filter(b => b.final);
-  const rec = await reconcile(sSnap, pSnap, finalOrders, cookLogBefore);
+  const rec = await reconcile(sSeed, pSeed, finalOrders, cookLogBefore, SEED_OPENING);
   const created = stats.created;
   const orderMatch = created === byStatus.new + byStatus.cook + byStatus.done + byStatus.cancel;
 
@@ -501,9 +606,17 @@ function nameKeyPf(items, id, loc) {
     }
   }
   const curP = await pfSnap();
+  // PATCH /pf-stock/:id пишет ВСЕ локации id — пэтчим каждый id один раз,
+  // предпочитая значение kitchen-снапшота (сим меняет только kitchen-пул).
+  const pfPatch = {};
   for (const k of Object.keys(pSnap.snap.snap)) {
     const [id] = k.split('|');
-    const q = pSnap.snap.snap[k];
+    if (pfPatch[id] !== undefined) continue;
+    const kq = pSnap.snap.snap[id + '|kitchen'];
+    const wq = pSnap.snap.snap[id + '|workshop'];
+    pfPatch[id] = kq != null ? kq : (wq != null ? wq : 0);
+  }
+  for (const [id, q] of Object.entries(pfPatch)) {
     await call('PATCH', '/pf-stock/' + encodeURIComponent(id), EP.PATCH_PF, { qty: q });
   }
   const r2 = await call('POST', '/admin/reset-orders', EP.RESET, { confirm: true, confirm_phrase: 'DELETE ALL ORDERS', start_num: CFG.RESET_START_NUM });
@@ -523,8 +636,11 @@ function nameKeyPf(items, id, loc) {
   const wallMin = round((Date.now() - startWall) / 60000, 1);
   const offeredPerMin = round(CFG.ORDERS / (DURATION_S / 60), 1);
   const effectivePerMin = round(stats.created / Math.max(wallMin / 60, 0.0001), 1);
+  const poolMin = stats.poolSamples.length ? Math.min(...stats.poolSamples.map(s => s.pool)) : null;
+  const poolMinSim = stats.poolSamples.length ? (stats.poolSamples.find(s => s.pool === poolMin) || {}).sim : null;
+  const seededPfAfterRestore = (seedRes ? seedRes.pf.filter(p => p.mode !== 'skip-enough') : []).map(p => ({ id: p.id, kitchen: vP.snap.qty(p.id, 'kitchen'), workshop: vP.snap.qty(p.id, 'workshop') }));
   const report = {
-    meta: { startedAt: ts(), wallMin, simDaySec: round(DURATION_S, 0), speed: CFG.SPEED, compress: CFG.COMPRESS, config: CFG },
+    meta: { startedAt: ts(), wallMin, simDaySec: round(DURATION_S, 0), speed: CFG.SPEED, compress: CFG.COMPRESS, seedOpening: SEED_OPENING, config: CFG },
     orderAccounting: {
       created, done: stats.done, cancelled: stats.cancel, leftover: stats.leftover,
       serverByStatus: byStatus, orderMatch, formula: 'created == done + cancelled + leftover', ok: orderMatch,
@@ -534,11 +650,21 @@ function nameKeyPf(items, id, loc) {
     throughput: { offeredPerMin, effectivePerMin, creationWallMs: round(stats.creationWallMs / 1000, 1) },
     latency: percentileReport(),
     errors: { order429Count: stats.order429Count, order429Sample: stats.order429.slice(0, 25) },
+    seed: seedRes ? Object.assign({}, seedRes, {
+      preSeed: {
+        r31: sSnap.snap.snap['r31'] != null ? sSnap.snap.snap['r31'] : null,
+        ready_s14_kitchen: pSnap.snap.snap['ready_s14|kitchen'] != null ? pSnap.snap.snap['ready_s14|kitchen'] : null,
+      },
+      baseline: { ready_s14_kitchen: pSeed.snap.snap['ready_s14|kitchen'] != null ? pSeed.snap.snap['ready_s14|kitchen'] : null },
+    }) : null,
     pool: {
       producedPortions: stats.producedPortions, producedKg: stats.producedKg,
       producedServer: rec.producedServer, cookBatches: stats.cookBatches,
       cookRejected400: stats.cookRejected400.length, cookRejected400Sample: stats.cookRejected400.slice(0, 10),
+      cookServer500: stats.cookServer500.length, cookServer500Sample: stats.cookServer500.slice(0, 10),
       readyShortOrders: stats.readyShortOrders, shortagesTotal: stats.shortages.length,
+      minPool: poolMin, poolMinSim,
+      poolSamples: stats.poolSamples.filter((s, i) => i % 10 === 0).slice(0, 30),
     },
     shortages: stats.shortages.slice(0, 100),
     consumption: rec.detail.filter(r => r.mismatch),
@@ -548,7 +674,7 @@ function nameKeyPf(items, id, loc) {
       ready_s14FormulaOk: rec.readyRow.check,
       journalTotalItems: rec.detail.length,
     },
-    restore: { backup1, backup2, residualDiffs: resDiffs },
+    restore: { backup1, backup2, residualDiffs: resDiffs, seededPfAfterRestore },
     whereItBreaks: [],
   };
 
@@ -556,16 +682,18 @@ function nameKeyPf(items, id, loc) {
   const wib = [];
   if (stats.order429Count > 0) wib.push('Потолок создания заказов: POST /order 20/мин на IP → ' + stats.order429Count + ' × 429; effective ' + effectivePerMin + '/мин vs offered ' + offeredPerMin + '/мин (создание заняло ' + report.throughput.creationWallMs + 'с).');
   if (rec.readyRow.consumedShort > 0) wib.push('Недостача пула ready_s14: ' + rec.readyRow.consumedShort + ' порций (shortage на заказах), минимум спроса vs производства.');
-  if (stats.cookRejected400.length) wib.push('Готовка упирается в сырьё: POST /cook 400 × ' + stats.cookRejected400.length + ' — r31 кончается, потолок ≈ ' + round((stats.producedKg), 2) + ' кг.');
+  if (stats.cookRejected400.length && (rec.readyRow.consumedShort > 0 || stats.readyShortOrders > 0)) wib.push('Готовка упирается в сырьё: POST /cook 400 × ' + stats.cookRejected400.length + ' — r31 кончается, потолок ≈ ' + round((stats.producedKg), 2) + ' кг; недостача готового пула на заказах.');
+  if (stats.cookServer500.length) wib.push('POST /cook с дробным qty → 500 × ' + stats.cookServer500.length + ' (cook_log.qty INT — сервер не принимает дробные порции, а порция фри бывает 0.75).');
   if (rec.mismatches.length) {
     const clamp = rec.mismatches.filter(m => /^s:/.test(m.key));
     wib.push('Расхождение журнал↔остаток по ' + rec.mismatches.length + ' позициям (напр. ' + rec.mismatches.slice(0, 5).map(m => m.key).join(', ') + ') — при нулевом остатке applyTechCard пишет полное списание, остаток клипится на 0.');
   }
   if (resDiffs.length) wib.push('Восстановление ПФ не идеально: ' + resDiffs.map(d => d.key + ' want ' + d.want + ' got ' + d.got).join('; ') + ' — PATCH /pf-stock/:id пишет все локации id, много-локационные позиции (p4) не восстановить точно.');
   const pfShorts = stats.shortages.filter(s => s.id !== CFG.POOL_ID).length;
-  if (pfShorts > 0) wib.push('НЕДОСТАЧА ПФ в кафе × ' + pfShorts + ' — блюда едят ПФ (p1..p10), которых нет в pf_stock kitchen (готовят в цеху): заказ проходит, пул не пополняется.');
+  if (pfShorts > 0) wib.push('НЕДОСТАЧА ПФ в кафе × ' + pfShorts + (SEED_OPENING ? ' (несмотря на пред-сток кухонных ПФ ×' + CFG.SEED_BUFFER + ' — реальная находка)' : ' — блюда едят ПФ (p1..p10), которых нет в pf_stock kitchen (готовят в цеху): заказ проходит, пул не пополняется.'));
   if (!orderMatch) wib.push('Счётчик заказов не сошёлся: created ' + created + ' vs сервер ' + JSON.stringify(byStatus));
   if (!rec.readyRow.check) wib.push('Формула ready_s14 (произведено − потреблено == Δ) НЕ сошлась.');
+  if (rec.readyRow.planVsJournal > 0.5) wib.push('Пул готовых порций «простаивает»: сервер списал по журналу на ' + rec.readyRow.planVsJournal + ' порций меньше, чем планировала симуляция (done-статус не прошёл у ' + stats.statusDoneFailed + ' заказов — списание не выполнилось, остаток завышен).');
   report.whereItBreaks = wib;
 
   console.log('── ГДЕ РВЁТСЯ ──');
