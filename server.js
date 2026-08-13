@@ -402,6 +402,13 @@ async function initDb() {
         url         TEXT,
         created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
       );
+      CREATE TABLE IF NOT EXISTS deduction_media (
+        id           BIGSERIAL PRIMARY KEY,
+        deduction_id BIGINT REFERENCES deductions(id) ON DELETE CASCADE,
+        kind         TEXT,
+        url          TEXT,
+        created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
       CREATE TABLE IF NOT EXISTS access_keys (
         role       TEXT PRIMARY KEY,
         token      TEXT NOT NULL,
@@ -612,10 +619,16 @@ app.patch('/stock/:id', requireRole('MANAGER', 'WORKSHOP', 'KITCHEN'), async (re
         return res.status(400).json({ ok: false, error: 'Нужно qty или delta' });
       }
       await client.query('UPDATE stock SET qty=$1, updated_at=now() WHERE id=$2', [it.qty, id]);
-      await client.query(
-        `INSERT INTO deductions (ing, qty, unit, reason, emp) VALUES ($1,$2,$3,$4,$5)`,
+      const ded = (await client.query(
+        `INSERT INTO deductions (ing, qty, unit, reason, emp) VALUES ($1,$2,$3,$4,$5) RETURNING id`,
         [it.name, (delta >= 0 ? '+' : '') + Number(delta.toFixed(4)), it.unit,
-         body.reason || 'Корректировка', body.emp || req.role]);
+         body.reason || 'Корректировка', body.emp || req.role])).rows[0];
+      const media = Array.isArray(body.media) ? body.media.slice(0, 5) : [];
+      for (const m of media) {
+        if (!m || typeof m.url !== 'string') continue;
+        await client.query('INSERT INTO deduction_media (deduction_id, kind, url) VALUES ($1,$2,$3)',
+          [ded.id, m.kind === 'receipt' ? 'receipt' : 'product', String(m.url).slice(0, 2000000)]);
+      }
       await client.query('COMMIT');
       client.release();
       res.json({ ok: true, item: { id: it.id, name: it.name, qty: rowToNum(it.qty), unit: it.unit, min: rowToNum(it.min), max: it.max == null ? null : rowToNum(it.max), location: it.location } });
@@ -835,6 +848,14 @@ app.get('/deductions', requireAnyRole, async (req, res) => {
   try {
     const { rows } = await pool.query('SELECT ' + JOURNAL_SEL.deductions + ' FROM deductions ORDER BY ts DESC LIMIT 3000');
     res.json({ ok: true, items: rows.map(r => ({ ...r, ts: Number(r.ts) })) });
+  } catch (e) { res.status(500).json({ ok: false, error: String(e) }); }
+});
+
+// GET /deductions/:id/media — фото списания
+app.get('/deductions/:id/media', requireAnyRole, async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT kind, url FROM deduction_media WHERE deduction_id=$1', [req.params.id]);
+    res.json({ ok: true, items: rows });
   } catch (e) { res.status(500).json({ ok: false, error: String(e) }); }
 });
 
