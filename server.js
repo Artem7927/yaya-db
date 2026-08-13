@@ -766,6 +766,15 @@ app.post('/deliveries/:id/reject', requireRole('MANAGER', 'WORKSHOP', 'KITCHEN')
   } catch (e) { res.status(500).json({ ok: false, error: String(e) }); }
 });
 
+// POST /deliveries/:id/cancel — закупщик отменяет свою ОЖИДАЮЩУЮ поставку
+app.post('/deliveries/:id/cancel', requireRole('MANAGER', 'BUYER'), async (req, res) => {
+  try {
+    const r = await pool.query("UPDATE purchases SET status='cancelled', accepted_at=now(), accepted_by=$1 WHERE id=$2 AND status='pending'", [req.role, req.params.id]);
+    if (!r.rowCount) return res.status(409).json({ ok: false, error: 'Можно отменить только ожидающую поставку' });
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ ok: false, error: String(e) }); }
+});
+
 // ── ПФ-СКЛАД (полуфабрикаты) ─────────────────────────────────────────
 app.get('/pf-stock', requireAnyRole, async (req, res) => {
   try {
