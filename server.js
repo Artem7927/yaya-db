@@ -709,7 +709,7 @@ app.get('/purchases', requireAnyRole, async (req, res) => {
     const where = cond.length ? ' WHERE ' + cond.join(' AND ') : '';
     const { rows } = await pool.query(
       `SELECT id, ts, ing_id, ing, location, qty, unit, price, total, supplier, note, created_by,
-              status, recv_qty, accepted_at, accepted_by, reject_reason
+              status, recv_qty, accepted_at, accepted_by, reject_reason, EXISTS(SELECT 1 FROM purchase_media m WHERE m.purchase_id = purchases.id) AS has_media
          FROM purchases${where} ORDER BY ts DESC LIMIT 2000`, args);
     res.json({ ok: true, items: rows.map(r => ({ ...r, ts: Number(r.ts), accepted_at: r.accepted_at ? Number(r.accepted_at) : null })) });
   } catch (e) { res.status(500).json({ ok: false, error: String(e) }); }
@@ -854,7 +854,7 @@ app.get('/deductions', requireAnyRole, async (req, res) => {
   } catch (e) { res.status(500).json({ ok: false, error: String(e) }); }
 });
 
-// GET /deductions/:id/media — фото списания
+/* GET /purchases/:id/media — фото закупки (товар/чек) */ app.get('/purchases/:id/media', requireAnyRole, async (req, res) => { try { const { rows } = await pool.query('SELECT kind, url FROM purchase_media WHERE purchase_id=$1', [req.params.id]); res.json({ ok: true, items: rows }); } catch (e) { res.status(500).json({ ok: false, error: String(e) }); } }); // GET /deductions/:id/media — фото списания
 app.get('/deductions/:id/media', requireAnyRole, async (req, res) => {
   try {
     const { rows } = await pool.query('SELECT kind, url FROM deduction_media WHERE deduction_id=$1', [req.params.id]);
