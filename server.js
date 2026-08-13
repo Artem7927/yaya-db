@@ -846,8 +846,11 @@ app.post('/deductions', requireAnyRole, async (req, res) => {
 });
 app.get('/deductions', requireAnyRole, async (req, res) => {
   try {
-    const { rows } = await pool.query('SELECT ' + JOURNAL_SEL.deductions + ' FROM deductions ORDER BY ts DESC LIMIT 3000');
-    res.json({ ok: true, items: rows.map(r => ({ ...r, ts: Number(r.ts) })) });
+    const { rows } = await pool.query(
+      `SELECT d.id, d.ts, d.ing, d.qty, d.unit, d.reason, d.emp,
+              EXISTS(SELECT 1 FROM deduction_media m WHERE m.deduction_id = d.id) AS has_media
+       FROM deductions d ORDER BY d.ts DESC LIMIT 3000`);
+    res.json({ ok: true, items: rows.map(r => ({ ...r, ts: Number(r.ts), has_media: !!r.has_media })) });
   } catch (e) { res.status(500).json({ ok: false, error: String(e) }); }
 });
 
