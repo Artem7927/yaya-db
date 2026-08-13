@@ -410,6 +410,12 @@ async function initDb() {
       ALTER TABLE orders ADD COLUMN IF NOT EXISTS accepted_at TIMESTAMPTZ;
       ALTER TABLE orders ADD COLUMN IF NOT EXISTS deducted    BOOLEAN DEFAULT false;
       ALTER TABLE orders ADD COLUMN IF NOT EXISTS fulfilled   TEXT;
+      ALTER TABLE purchases ADD COLUMN IF NOT EXISTS status        TEXT DEFAULT 'accepted';
+      ALTER TABLE purchases ADD COLUMN IF NOT EXISTS recv_qty      NUMERIC;
+      ALTER TABLE purchases ADD COLUMN IF NOT EXISTS accepted_at   TIMESTAMPTZ;
+      ALTER TABLE purchases ADD COLUMN IF NOT EXISTS accepted_by   TEXT;
+      ALTER TABLE purchases ADD COLUMN IF NOT EXISTS reject_reason TEXT;
+      CREATE INDEX IF NOT EXISTS idx_purch_status ON purchases(status);
       CREATE INDEX IF NOT EXISTS idx_stock_loc     ON stock(location);
       CREATE INDEX IF NOT EXISTS idx_ded_ts        ON deductions(ts DESC);
       CREATE INDEX IF NOT EXISTS idx_transfers_ts  ON transfers(ts DESC);
@@ -684,10 +690,79 @@ app.post('/stock/:id/receive', requireRole('MANAGER', 'BUYER'), async (req, res)
 // GET /purchases?date=YYYY-MM-DD
 app.get('/purchases', requireAnyRole, async (req, res) => {
   try {
+    const cond = [], args = [];
+    if (req.query.status)   { args.push(String(req.query.status));   cond.push('status = $' + args.length); }
+    if (req.query.location) { args.push(String(req.query.location)); cond.push('location = $' + args.length); }
+    const where = cond.length ? ' WHERE ' + cond.join(' AND ') : '';
     const { rows } = await pool.query(
-      `SELECT id, ts, ing_id, ing, location, qty, unit, price, total, supplier, note, created_by
-         FROM purchases ORDER BY ts DESC LIMIT 2000`);
-    res.json({ ok: true, items: rows.map(r => ({ ...r, ts: Number(r.ts) })) });
+      `SELECT id, ts, ing_id, ing, location, qty, unit, price, total, supplier, note, created_by,
+              status, recv_qty, accepted_at, accepted_by, reject_reason
+         FROM purchases${where} ORDER BY ts DESC LIMIT 2000`, args);
+    res.json({ ok: true, items: rows.map(r => ({ ...r, ts: Number(r.ts), accepted_at: r.accepted_at ? Number(r.accepted_at) : null })) });
+  } catch (e) { res.status(500).json({ ok: false, error: String(e) }); }
+});
+
+// ── ПРИЁМКА ПОСТАВОК (закупщик → склад с подтверждением) ─────────────
+// POST /stock/:id/deliver — закупщик создаёт ОЖИДАЮЩУЮ поставку (склад НЕ меняется)
+app.post('/stock/:id/deliver', requireRole('MANAGER', 'BUYER'), async (req, res) => {
+  try {
+    const b = req.body || {};
+    const qty = Number(b.qty);
+    if (!(qty > 0)) return res.status(400).json({ ok: false, error: 'Нужно количество > 0' });
+    const price = Number(b.price) || 0;
+    const it = (await pool.query('SELECT * FROM stock WHERE id=$1', [req.params.id])).rows[0];
+    if (!it) return res.status(404).json({ ok: false, error: 'Позиция не найдена' });
+    const p = (await pool.query(
+      `INSERT INTO purchases (ing_id, ing, location, qty, unit, price, total, supplier, note, created_by, status)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'pending') RETURNING id`,
+      [it.id, it.name, it.location, qty, it.unit, price, qty * price, String(b.supplier || ''), String(b.note || ''), req.role])).rows[0];
+    const media = Array.isArray(b.media) ? b.media.slice(0, 5) : [];
+    for (const m of media) {
+      if (!m || typeof m.url !== 'string') continue;
+      await pool.query('INSERT INTO purchase_media (purchase_id, kind, url) VALUES ($1,$2,$3)',
+        [p.id, m.kind === 'receipt' ? 'receipt' : 'product', String(m.url).slice(0, 2000000)]);
+    }
+    res.json({ ok: true, id: p.id });
+  } catch (e) { res.status(500).json({ ok: false, error: String(e) }); }
+});
+
+// POST /deliveries/:id/accept — склад принимает; body.recv_qty (необяз.) = скорректированный факт
+app.post('/deliveries/:id/accept', requireRole('MANAGER', 'WORKSHOP', 'KITCHEN'), async (req, res) => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const p = (await client.query("SELECT * FROM purchases WHERE id=$1 AND status='pending' FOR UPDATE", [req.params.id])).rows[0];
+    if (!p) { await client.query('ROLLBACK'); client.release(); return res.status(409).json({ ok: false, error: 'Поставка не найдена или уже обработана' }); }
+    if ((req.role === 'WORKSHOP' && p.location !== 'workshop') || (req.role === 'KITCHEN' && p.location !== 'kitchen')) {
+      await client.query('ROLLBACK'); client.release(); return res.status(403).json({ ok: false, error: 'Не ваш склад' });
+    }
+    const rq = Number(req.body && req.body.recv_qty);
+    const final = (rq > 0) ? rq : Number(p.qty);
+    const it = (await client.query('SELECT * FROM stock WHERE id=$1 FOR UPDATE', [p.ing_id])).rows[0];
+    if (!it) { await client.query('ROLLBACK'); client.release(); return res.status(404).json({ ok: false, error: 'Позиция склада не найдена' }); }
+    const newQty = Number(it.qty) + final;
+    const newMax = (it.max == null || newQty > Number(it.max)) ? newQty : Number(it.max);
+    await client.query('UPDATE stock SET qty=$1, max=$2, updated_at=now() WHERE id=$3', [newQty, newMax, it.id]);
+    await client.query("UPDATE purchases SET status='accepted', recv_qty=$1, total=$2, accepted_at=now(), accepted_by=$3 WHERE id=$4",
+      [final, final * Number(p.price || 0), req.role, p.id]);
+    await client.query(`INSERT INTO deductions (ing, qty, unit, reason, emp) VALUES ($1,$2,$3,$4,$5)`,
+      [it.name, '+' + final, it.unit, 'Приёмка (' + (it.location === 'kitchen' ? 'Кухня' : 'Цех') + ')', req.role]);
+    await client.query('COMMIT'); client.release();
+    res.json({ ok: true, qty: final });
+  } catch (e) { try { await client.query('ROLLBACK'); client.release(); } catch (_) {} res.status(500).json({ ok: false, error: String(e) }); }
+});
+
+// POST /deliveries/:id/reject — склад отклоняет; body.reason (необяз.)
+app.post('/deliveries/:id/reject', requireRole('MANAGER', 'WORKSHOP', 'KITCHEN'), async (req, res) => {
+  try {
+    const p = (await pool.query("SELECT location FROM purchases WHERE id=$1 AND status='pending'", [req.params.id])).rows[0];
+    if (!p) return res.status(409).json({ ok: false, error: 'Поставка не найдена или уже обработана' });
+    if ((req.role === 'WORKSHOP' && p.location !== 'workshop') || (req.role === 'KITCHEN' && p.location !== 'kitchen')) {
+      return res.status(403).json({ ok: false, error: 'Не ваш склад' });
+    }
+    await pool.query("UPDATE purchases SET status='rejected', reject_reason=$1, accepted_at=now(), accepted_by=$2 WHERE id=$3",
+      [String((req.body && req.body.reason) || ''), req.role, req.params.id]);
+    res.json({ ok: true });
   } catch (e) { res.status(500).json({ ok: false, error: String(e) }); }
 });
 
