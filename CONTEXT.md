@@ -1,0 +1,101 @@
+Правь на месте при изменении кода, НЕ дописывай.
+
+# CONTEXT — yaya-db (сервер)
+
+## 1. Назначение репо
+Единый бэкенд и API для всех клиентов YaYa Chicken — Node/Express + Postgres (Railway) — общее хранилище для системы учёта и заказов витрины (package.json). URL: https://yaya-db-production.up.railway.app.
+
+## 2. Стек и точка входа
+Node >=18, Express ^4.19, pg ^8.11 (Postgres), web-push ^3.6 (VAPID). Корень/точка входа — server.js (`npm start`, PORT env или 3000); server.js сам создаёт схему БД и стартует только после initDb. seed.js — только данные для сида пустых таблиц. Роутов/README нет.
+
+## 3. Структура
+- server.js — весь бэкенд: инициализация схемы, KV-слой, роли/авторизация, все эндпоинты, web-push, идемпотентные миграции.
+- seed.js — дефолтные данные: stock (сырьё), pf_stock (полуфабрикаты), ws-рецепты, cook-рецепты, техкарты заказов; применяются только при пустых таблицах/отсутствующих KV-ключах.
+- tools/day-sim.cjs — симулятор рабочего дня (генерит заказы/готовку/списание) против production API, требует MANAGER-токен (env YAYA_TOKEN); пишет отчёт.
+- tools/day-sim-report.json — отчёт последнего прогона day-sim.
+
+## 4. Публичные интерфейсы (API)
+Токен: X-Admin-Token | X-Token | ?token; курьер дополнительно — X-Courier-Name. Роли: MANAGER, SUPERVISOR, ASSEMBLER, WORKSHOP, KITCHEN, BUYER, COURIER.
+
+Публичные (без авторизации):
+- GET /health — health, флаги auth/push
+- GET /auth-check — проверка токена, возвращает роль (limit 20/мин)
+- GET /next-order-num — следующий номер заказа (30/мин)
+- POST /order — принять заказ витрины (20/мин)
+- GET /orders/status?nums= — статусы заказов витрины по номерам (120/мин)
+- GET /kv/:key — только ключи PUBLIC_READ: yaya_radio, yaya_tv, yaya_menu, yaya_stock, yaya_banners, yaya_promos, yaya_courier_pos, yaya_greetings, yaya_greet
+- POST /kv/:key/append — публично только для yaya_greet_req (20/мин)
+- GET /push/public-key — VAPID-ключ
+- POST /push/subscribe — подписка (role из body: admin/courier/workshop/kitchen/buyer/client)
+- GET /push/status — статистика подписок и статус push
+
+Роль-гейтед:
+- GET /kv/:key — любая роль; курьер-токен + X-Courier-Name — только COURIER_KV
+- PUT /kv/:key — MANAGER; курьер-токен — только yaya_order_couriers/yaya_courier_pos/yaya_couriers
+- POST /kv/:key/append — MANAGER (кроме публичного yaya_greet_req)
+- GET /purchase-assign — любая роль
+- PUT /purchase-assign — MANAGER
+- GET /settings — любая роль
+- PUT /settings — MANAGER
+- GET /keys — MANAGER
+- POST /keys/:role/rotate — MANAGER (новая access_keys-токен роли)
+- GET /stock?location= — любая роль
+- PATCH /stock/:id — MANAGER/WORKSHOP/KITCHEN (+ гейт по location) — пересчёт qty или delta, журнал + media
+- POST /stock — MANAGER/WORKSHOP/KITCHEN (+ гейт по location) — добавить позицию
+- DELETE /stock/:id — MANAGER/WORKSHOP/KITCHEN (+ гейт по location)
+- POST /stock/:id/receive — MANAGER/BUYER — приход на склад, покупка status=accepted
+- POST /stock/:id/deliver — MANAGER/BUYER — создаёт поставку status=pending (склад не меняется)
+- GET /purchases?status=&location= — любая роль
+- GET /purchases/:id/media — любая роль
+- POST /deliveries/:id/accept — MANAGER/WORKSHOP/KITCHEN (+ гейт по location поставки), body.recv_qty — факт
+- POST /deliveries/:id/reject — MANAGER/WORKSHOP/KITCHEN (+ гейт по location), body.reason
+- POST /deliveries/:id/cancel — MANAGER/BUYER (только pending)
+- GET /pf-stock — любая роль
+- PATCH /pf-stock/:id — MANAGER/WORKSHOP/KITCHEN — пересчёт остатка ПФ (без гейта location)
+- GET /deductions — любая роль
+- GET /deductions/:id/media — любая роль
+- GET /transfers — любая роль
+- GET /cook-log — любая роль
+- GET /production-log — любая роль
+- POST /deductions — любая роль
+- POST /transfers — MANAGER/WORKSHOP/KITCHEN
+- POST /cook-log — MANAGER/KITCHEN
+- POST /production-log — MANAGER/WORKSHOP
+- POST /produce — MANAGER/WORKSHOP — производство ПФ цеха (сырьё → pf_stock workshop)
+- GET /cook-recipes — MANAGER/KITCHEN
+- POST /cook — MANAGER/KITCHEN — сырьё → готовые порции (pf_stock kitchen, ready_<dishId>)
+- POST /transfer — MANAGER/WORKSHOP/KITCHEN — перемещение ПФ цех↔кухня (dir ws-ks|ks-ws)
+- GET /orders — любая роль; COURIER видит только свои (X-Courier-Name/?me)
+- POST /orders/:id/status — MANAGER/SUPERVISOR/ASSEMBLER — cook/done/cancel, автосписание по техкарте
+- POST /orders/:id/fulfill — MANAGER/SUPERVISOR/ASSEMBLER — mode cafe|pickup|courier
+- POST /admin/reset-orders — MANAGER, 3/мин — очистка заказов с бэкапом в KV
+- POST /push/notify-courier — MANAGER
+- POST /push/test — MANAGER
+
+## 5. Внешние связи — кто обращается к серверу
+Все 4 фронтенда обращаются к ОДНОМУ серверу (один Postgres, один VAPID):
+- yaya-kitchen (public): POST /order, GET /next-order-num, GET /orders/status, GET/PUT /kv/* (yaya_menu, yaya_banners, yaya_tv*, yaya_greet_req), /push/public-key, /push/subscribe.
+- yaya-chicken-admin (MANAGER/SUPERVISOR/ASSEMBLER): /auth-check, /orders, /orders/:id/status, /orders/:id/fulfill, /admin/reset-orders, /kv/* (yaya_menu, yaya_stock, yaya_banners, yaya_tv, yaya_couriers, yaya_order_couriers), /push/* (notify-courier, status, test), /settings, /keys.
+- yaya-chicken-courier (COURIER): /auth-check, /orders, /orders/:id/status, /kv/* (yaya_order_couriers, yaya_courier_pos, yaya_couriers).
+- yaya-kabinet (учёт, роль-гейтед): /stock*, /pf-stock*, /purchases, /purchase-assign, /deliveries/:id/(accept|reject|cancel), /deductions*, /transfers|/transfer, /produce, /cook*, /production-log, /cook-log, /settings, /keys, /kv/*.
+- Внутри репо: tools/day-sim.cjs дёргает тот же API (MANAGER-токен; YAYA_API).
+
+KV — межрепный контракт: yaya_menu (admin/kabinet→kitchen/kabinet), yaya_order_couriers/yaya_courier_pos (admin↔courier), yaya_banners/tv (admin→kitchen). Смена схемы значения KV — скрытая поломка у другого репо.
+
+## 6. Готчи
+- KV: таблица kv(k PK, v jsonb, updated_at) + хелперы kvGet/kvSet. Ключи: публичное чтение — yaya_radio, yaya_tv, yaya_menu, yaya_stock, yaya_banners, yaya_promos, yaya_courier_pos, yaya_greetings, yaya_greet; публичный append — yaya_greet_req; курьерские (чтение + PUT курьером) — yaya_order_couriers, yaya_courier_pos, yaya_couriers; серверные — yaya_push_subs ({admin, couriers, orders, roles}), yaya_tech_v3 (техкарты), yaya_wsrecipes_v3, yaya_cookrecipes_v1, yaya_settings (cook_minutes, fulfill_minutes), yaya_purchase_assign_v1; маркеры миграций — yaya_migr_ready_fries_v1, yaya_migr_ready_r31_v1; бэкапы — yaya_flip_r31_backup_<ts>, yaya_schema_backup_<ts>, yaya_orders_backup_<ts>.
+- Роли: ALL_ROLES = [MANAGER, SUPERVISOR, ASSEMBLER, WORKSHOP, KITCHEN, BUYER, COURIER]; requireRole/requireAnyRole. roleOf напрямую сверяет только env ADMIN_TOKEN/MANAGER_TOKEN→MANAGER и courier_token→COURIER; остальные роли валидны ТОЛЬКО через таблицу access_keys (ротация — POST /keys/:role/rotate, только MANAGER).
+- Источник правды — Postgres. env: ADMIN_TOKEN, MANAGER_TOKEN, courier_token, DATABASE_URL, VAPID_PUBLIC/PRIVATE/SUBJECT, PORT.
+- CORS: Access-Control-Allow-Origin: *; методы GET,POST,PUT,PATCH,DELETE,OPTIONS; заголовки Content-Type,X-Admin-Token,X-Token,X-Courier-Name.
+- Единая VAPID-пара: /push/public-key, /push/subscribe (KV yaya_push_subs), /push/notify-courier (MANAGER). Клиентские пуши — по номеру заказа: store.orders[<num>]. Роли-пуши — store.roles[kitchen|workshop|buyer].
+- PUT /kv/yaya_order_couriers триггерит пуши клиентам при смене delivery_status (on_way→'Курьер в пути', delivered→'Заказ доставлен'); /admin/reset-orders чистит этот ключ и store.orders.
+- Жизненный цикл заказа: new→cook→done→fulfilled (или cancel). Списание по yaya_tech_v3 — единожды при done (флаг deducted); cancel возвращает остатки. Нехватка ПФ кафе (location='kitchen') — списывается что есть, остаток логируется как 'НЕДОСТАЧА ПФ в кафе' и возвращается в shortage/deduct_shortage (вариант B).
+- initDb на старте: CREATE TABLE IF NOT EXISTS (kv, orders, stock, pf_stock, deductions, transfers, cook_log, production_log, purchases, purchase_media, deduction_media, access_keys, seq order_num_seq) → migrateSchema (pf_stock составной PK (id,location), колонки crit/max) → seedIfEmpty (сиды + бутстрап access_keys из ROLE_ENV) → migrateReadyR31; при ошибке — process.exit(1).
+- Миграции фри: migrateReadyFries (r31→ready_s14, 1 порция=0.2кг) определена, но в initDb НЕ вызывается; активная — migrateReadyR31 (ready_s14→r31, с бэкапом yaya_flip_r31_backup_<ts>, при отсутствии техкарт — громкое падение).
+- Гейты по location: stock — WORKSHOP только 'workshop', KITCHEN только 'kitchen', MANAGER всё; /deliveries/:id accept|reject — по location поставки; PATCH /pf-stock/:id и /transfer — гейта location НЕТ.
+- Rate-limit в памяти (Map, ключ ip|path, сбрасывается при рестарте): /auth-check 20/мин, /next-order-num 30/мин, /order 20/мин, /orders/status 120/мин, /kv/:key/append 20/мин, /admin/reset-orders 3/мин.
+- POST /order: при body.type='RECEIPT' пуш админу не отправляется.
+- GET /orders для курьера: фильтр по нормализованному имени (lowercase, ё→е, схлопывание пробелов) из X-Courier-Name/?me против yaya_order_couriers[<id>].courier; к env-курьеру применимо так же.
+- /auth-check: ADMIN_TOKEN→role 'admin', MANAGER_TOKEN→'MANAGER', courier_token→'courier' (lowercase), токены access_keys→своя роль; AUTH_ON = наличие ADMIN/MANAGER env.
+- express.json limit '2mb'; app.set('trust proxy', 1); OPTIONS → 204.
+- TODO(owner): КАНОН утверждает, что у ролей SUPERVISOR/ASSEMBLER/WORKSHOP/KITCHEN/BUYER env-токенов нет, но ROLE_ENV (server.js) читает SUPERVISOR_TOKEN/ASSEMBLER_TOKEN/WORKSHOP_TOKEN/KITCHEN_TOKEN/BUYER_TOKEN (+ YA_* варианты) и бутстрапит их в access_keys при старте. Какое поведение целевое — уточнить у владельца.
