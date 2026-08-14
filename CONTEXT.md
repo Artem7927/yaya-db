@@ -45,7 +45,7 @@ Node >=18, Express ^4.19, pg ^8.11 (Postgres), web-push ^3.6 (VAPID). Корен
 - DELETE /stock/:id — MANAGER/WORKSHOP/KITCHEN (+ гейт по location)
 - POST /stock/:id/receive — MANAGER/BUYER — приход на склад, покупка status=accepted
 - POST /stock/:id/deliver — MANAGER/BUYER — создаёт поставку status=pending (склад не меняется)
-- GET /purchases?status=&location= — любая роль
+- GET /purchases?status=&location=&from=&to= — любая роль; from/to — эпоха ms, полуинтервал [from,to) по ts (TIMESTAMPTZ), необязательны, комбинируются со status/location
 - GET /purchases/:id/media — любая роль
 - POST /deliveries/:id/accept — MANAGER/WORKSHOP/KITCHEN (+ гейт по location поставки), body.recv_qty — факт
 - POST /deliveries/:id/reject — MANAGER/WORKSHOP/KITCHEN (+ гейт по location), body.reason
