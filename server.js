@@ -48,7 +48,7 @@ async function loadSubs() {
     const r = await pool.query('SELECT v FROM kv WHERE k=$1', ['yaya_push_subs']);
     if (r.rows.length && r.rows[0].v && typeof r.rows[0].v === 'object') return r.rows[0].v;
   } catch (e) {}
-  return { admin: [], couriers: {}, orders: {} };
+  return { admin: [], couriers: {}, orders: {}, roles: {} };
 }
 async function saveSubs(s) {
   try {
@@ -68,6 +68,14 @@ async function sendPush(subs, payload) {
     webpush.sendNotification(sub, JSON.stringify(payload))
       .catch(err => console.error('[push]', err.statusCode, sub?.endpoint?.slice(-16), err.body))
   ));
+}
+async function sendPushRole(role, payload) {
+  if (!PUSH_ON) return;
+  try {
+    const store = await loadSubs();
+    const bucket = (store.roles || {})[String(role)];
+    if (bucket && bucket.length) await sendPush(bucket, payload);
+  } catch (e) {}
 }
 const DST_PUSH = { on_way: 'Курьер в пути', delivered: 'Заказ доставлен' };
 async function notifyDeliveryChanges(prev, next) {
@@ -257,6 +265,29 @@ async function migrateReadyFries(client) {
   await kvSet('yaya_migr_ready_fries_v1', true, client);
 }
 
+// Обратная одноразовая миграция: техкарты возвращаются с пула готовых
+// порций (ready_s14) на сырьё r31 (кг). 1 порция = 0.2 кг ⇒ r31_kg = qty_ready * 0.2.
+// БЕЗ фолбэка на DEFAULT (там всё ещё ready_s14): если техкарт нет — падаем громко.
+async function migrateReadyR31(client) {
+  if ((await kvGet('yaya_migr_ready_r31_v1', client)) != null) return;
+  const tc = await kvGet('yaya_tech_v3', client);
+  if (!tc || typeof tc !== 'object') {
+    throw new Error('migrateReadyR31: yaya_tech_v3 отсутствует — нечего переводить');
+  }
+  const backupKey = 'yaya_flip_r31_backup_' + Date.now();
+  await kvSet(backupKey, tc, client);
+  console.log('[migr] backup →', backupKey);
+  const out = {};
+  for (const dishId of Object.keys(tc)) {
+    out[dishId] = (tc[dishId] || []).map(it =>
+      it && it.ingId === 'ready_s14'
+        ? { ingId: 'r31', qty: Number((Number(it.qty) * 0.2).toFixed(4)), unit: 'кг' }
+        : it);
+  }
+  await kvSet('yaya_tech_v3', out, client);
+  await kvSet('yaya_migr_ready_r31_v1', true, client);
+}
+
 // ── Миграция схемы (идемпотентно, в транзакции) ──────────────────────
 // pf_stock: составной PK (id, location) + пороги crit/max; stock: порог crit.
 // Существующие остатки ПФ трактуем как «в цеху» (location='workshop').
@@ -432,7 +463,7 @@ async function initDb() {
     `);
     await migrateSchema(client);
     await seedIfEmpty(client);
-    await migrateReadyFries(client);
+    await migrateReadyR31(client);
     client.release();
   } catch (e) {
     client.release();
@@ -531,6 +562,32 @@ app.post('/kv/:key/append', limit(20, 60000), async (req, res) => {
       [key, JSON.stringify([item])]
     );
     res.json({ ok: true });
+  } catch (e) { res.status(500).json({ ok: false, error: String(e) }); }
+});
+
+// ── НАЗНАЧЕНИЕ ЗАКУПОК (менеджер → закупщик) ─────────────────────────
+const PURCH_ASSIGN_KV = 'yaya_purchase_assign_v1';
+app.get('/purchase-assign', requireAnyRole, async (req, res) => {
+  try {
+    const assign = (await kvGet(PURCH_ASSIGN_KV)) || {};
+    res.json({ ok: true, assign });
+  } catch (e) { res.status(500).json({ ok: false, error: String(e) }); }
+});
+app.put('/purchase-assign', requireRole('MANAGER'), async (req, res) => {
+  try {
+    const b = req.body || {};
+    const src = (b.assign && typeof b.assign === 'object') ? b.assign : {};
+    const assign = {};
+    for (const k of Object.keys(src)) {
+      const v = src[k];
+      if (v === '🛒' || v === '🚚') { assign[String(k)] = v; }
+      else if (v && typeof v === 'object' && v.t === '🧾') {
+        const sum = Math.round(Number(v.sum) || 0);
+        assign[String(k)] = sum > 0 ? { t: '🧾', sum } : '🛒';
+      }
+    }
+    await kvSet(PURCH_ASSIGN_KV, assign);
+    res.json({ ok: true, assign });
   } catch (e) { res.status(500).json({ ok: false, error: String(e) }); }
 });
 
@@ -735,6 +792,15 @@ app.post('/stock/:id/deliver', requireRole('MANAGER', 'BUYER'), async (req, res)
       await pool.query('INSERT INTO purchase_media (purchase_id, kind, url) VALUES ($1,$2,$3)',
         [p.id, m.kind === 'receipt' ? 'receipt' : 'product', String(m.url).slice(0, 2000000)]);
     }
+    try {
+      const store = await loadSubs();
+      const whRole = (it.location === 'kitchen') ? 'kitchen' : 'workshop';
+      await sendPush((store.roles || {})[whRole], {
+        title: 'Поставка ждёт приёмки',
+        body: it.name + ' · +' + qty + ' ' + it.unit + (price ? ' · ' + (qty * price).toLocaleString('ru') + ' тг' : ''),
+        tag: 'purch-' + p.id, url: './'
+      });
+    } catch (e) {}
     res.json({ ok: true, id: p.id });
   } catch (e) { res.status(500).json({ ok: false, error: String(e) }); }
 });
@@ -761,6 +827,14 @@ app.post('/deliveries/:id/accept', requireRole('MANAGER', 'WORKSHOP', 'KITCHEN')
     await client.query(`INSERT INTO deductions (ing, qty, unit, reason, emp) VALUES ($1,$2,$3,$4,$5)`,
       [it.name, '+' + final, it.unit, 'Приёмка (' + (it.location === 'kitchen' ? 'Кухня' : 'Цех') + ')', req.role]);
     await client.query('COMMIT'); client.release();
+    try {
+      const store = await loadSubs();
+      await sendPush((store.roles || {})['buyer'], {
+        title: 'Поставка принята',
+        body: it.name + ' · +' + final + ' ' + it.unit + ' · ' + (it.location === 'kitchen' ? 'Кухня' : 'Цех'),
+        tag: 'purch-' + p.id, url: './'
+      });
+    } catch (e) {}
     res.json({ ok: true, qty: final });
   } catch (e) { try { await client.query('ROLLBACK'); client.release(); } catch (_) {} res.status(500).json({ ok: false, error: String(e) }); }
 });
@@ -775,6 +849,15 @@ app.post('/deliveries/:id/reject', requireRole('MANAGER', 'WORKSHOP', 'KITCHEN')
     }
     await pool.query("UPDATE purchases SET status='rejected', reject_reason=$1, accepted_at=now(), accepted_by=$2 WHERE id=$3",
       [String((req.body && req.body.reason) || ''), req.role, req.params.id]);
+    try {
+      const store = await loadSubs();
+      const q = await pool.query('SELECT ing FROM purchases WHERE id=$1', [req.params.id]);
+      await sendPush((store.roles || {})['buyer'], {
+        title: 'Поставка отклонена',
+        body: ((q.rows[0] && q.rows[0].ing) || 'Позиция') + (req.body && req.body.reason ? ' · ' + String(req.body.reason) : ''),
+        tag: 'purch-' + req.params.id, url: './'
+      });
+    } catch (e) {}
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ ok: false, error: String(e) }); }
 });
@@ -1063,8 +1146,8 @@ app.post('/order', limit(20, 60000), async (req, res) => {
       const r = await pool.query("SELECT nextval('order_num_seq') AS num");
       num = Number(r.rows[0].num);
     }
-    await pool.query('INSERT INTO orders (num, data) VALUES ($1, $2)', [num, body]);
-    res.json({ ok: true, num });
+    const ins = await pool.query('INSERT INTO orders (num, data) VALUES ($1, $2) RETURNING id', [num, body]);
+    res.json({ ok: true, num, id: Number(ins.rows[0].id) });
     if (body.type !== 'RECEIPT') {
       try {
         const store = await loadSubs();
@@ -1370,6 +1453,9 @@ app.post('/push/subscribe', async (req, res) => {
       const key = String(name).trim().toLowerCase();
       store.couriers = store.couriers || {};
       store.couriers[key] = dedupeSubs([...(store.couriers[key] || []), sub]);
+    } else if (role === 'workshop' || role === 'kitchen' || role === 'buyer') {
+      store.roles = store.roles || {};
+      store.roles[role] = dedupeSubs([...(store.roles[role] || []), sub]);
     } else if (role === 'client' && num) {
       store.orders = store.orders || {};
       store.orders[String(num)] = dedupeSubs([...(store.orders[String(num)] || []), sub]);
