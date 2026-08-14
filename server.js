@@ -757,12 +757,15 @@ app.post('/stock/:id/receive', requireRole('MANAGER', 'BUYER'), async (req, res)
   } catch (e) { res.status(500).json({ ok: false, error: String(e) }); }
 });
 
-// GET /purchases?date=YYYY-MM-DD
+// GET /purchases?status=&location=&from=&to=  (from/to — эпоха ms, полуинтервал [from, to))
 app.get('/purchases', requireAnyRole, async (req, res) => {
   try {
     const cond = [], args = [];
     if (req.query.status)   { args.push(String(req.query.status));   cond.push('status = $' + args.length); }
     if (req.query.location) { args.push(String(req.query.location)); cond.push('location = $' + args.length); }
+    const from = Number(req.query.from), to = Number(req.query.to);
+    if (Number.isFinite(from)) { args.push(from); cond.push('ts >= to_timestamp($' + args.length + '::double precision / 1000.0)'); }
+    if (Number.isFinite(to))   { args.push(to);   cond.push('ts <  to_timestamp($' + args.length + '::double precision / 1000.0)'); }
     const where = cond.length ? ' WHERE ' + cond.join(' AND ') : '';
     const { rows } = await pool.query(
       `SELECT id, ts, ing_id, ing, location, qty, unit, price, total, supplier, note, created_by,
