@@ -460,6 +460,18 @@ async function initDb() {
       CREATE INDEX IF NOT EXISTS idx_cooklog_ts    ON cook_log(ts DESC);
       CREATE INDEX IF NOT EXISTS idx_prodlog_ts    ON production_log(ts DESC);
       CREATE INDEX IF NOT EXISTS idx_purch_ts      ON purchases(ts DESC);
+      CREATE TABLE IF NOT EXISTS supply_assign_log (
+        id           BIGSERIAL PRIMARY KEY,
+        ing_id       TEXT,
+        ing          TEXT,
+        assign_type  TEXT,
+        assign_sum   NUMERIC,
+        assigned_by  TEXT,
+        assigned_at  TIMESTAMPTZ DEFAULT now()
+      );
+      CREATE INDEX IF NOT EXISTS idx_assign_log_at ON supply_assign_log(assigned_at DESC);
+      ALTER TABLE purchases ADD COLUMN IF NOT EXISTS assign_type TEXT;
+      ALTER TABLE purchases ADD COLUMN IF NOT EXISTS assign_sum  NUMERIC;
     `);
     await migrateSchema(client);
     await seedIfEmpty(client);
@@ -577,6 +589,7 @@ app.put('/purchase-assign', requireRole('MANAGER'), async (req, res) => {
   try {
     const b = req.body || {};
     const src = (b.assign && typeof b.assign === 'object') ? b.assign : {};
+    const oldAssign = (await kvGet(PURCH_ASSIGN_KV)) || {};
     const assign = {};
     for (const k of Object.keys(src)) {
       const v = src[k];
@@ -586,8 +599,66 @@ app.put('/purchase-assign', requireRole('MANAGER'), async (req, res) => {
         assign[String(k)] = sum > 0 ? { t: '🧾', sum } : '🛒';
       }
     }
+    const allKeys = new Set([...Object.keys(oldAssign), ...Object.keys(assign)]);
+    for (const id of allKeys) {
+      const old = oldAssign[id] || null;
+      const cur = assign[id] || null;
+      const oldType = old == null ? null : (typeof old === 'object' && old.t === '🧾' ? '🧾' : old);
+      const oldSum  = old != null && typeof old === 'object' && old.t === '🧾' ? Number(old.sum) || 0 : null;
+      const curType = cur == null ? null : (typeof cur === 'object' && cur.t === '🧾' ? '🧾' : cur);
+      const curSum  = cur != null && typeof cur === 'object' && cur.t === '🧾' ? Number(cur.sum) || 0 : null;
+      if (oldType === curType && oldSum === curSum) continue;
+      const nameRow = (await pool.query('SELECT ing FROM stock WHERE id=$1', [id])).rows[0];
+      const ing = nameRow ? nameRow.ing : null;
+      if (cur != null) {
+        await pool.query(
+          'INSERT INTO supply_assign_log (ing_id, ing, assign_type, assign_sum, assigned_by) VALUES ($1,$2,$3,$4,$5)',
+          [id, ing, curType, curSum, req.role]);
+      } else {
+        await pool.query(
+          'INSERT INTO supply_assign_log (ing_id, ing, assign_type, assign_sum, assigned_by) VALUES ($1,$2,NULL,NULL,$3)',
+          [id, ing, req.role]);
+      }
+    }
     await kvSet(PURCH_ASSIGN_KV, assign);
     res.json({ ok: true, assign });
+  } catch (e) { res.status(500).json({ ok: false, error: String(e) }); }
+});
+
+// ── ЖУРНАЛ НАЗНАЧЕНИЙ / ПОСТАВОК ───────────────────────────────────────
+app.get('/supply-log', requireRole('MANAGER'), async (req, res) => {
+  try {
+    const fromIso = req.query.from, toIso = req.query.to;
+    const condA = [], argsA = [], condP = [], argsP = [];
+    if (fromIso) {
+      const fromMs = new Date(fromIso).getTime();
+      if (Number.isFinite(fromMs)) {
+        condA.push('assigned_at >= $' + (argsA.length + 1)); argsA.push(fromIso);
+        condP.push('ts >= to_timestamp($' + (argsP.length + 1) + '::double precision / 1000.0)'); argsP.push(fromMs);
+      }
+    }
+    if (toIso) {
+      const toMs = new Date(toIso).getTime();
+      if (Number.isFinite(toMs)) {
+        condA.push('assigned_at < $' + (argsA.length + 1)); argsA.push(toIso);
+        condP.push('ts < to_timestamp($' + (argsP.length + 1) + '::double precision / 1000.0)'); argsP.push(toMs);
+      }
+    }
+    const wA = condA.length ? ' WHERE ' + condA.join(' AND ') : '';
+    const wP = condP.length ? ' WHERE ' + condP.join(' AND ') : '';
+    const qA = pool.query(
+      `SELECT ing_id, ing, assign_type, assign_sum, assigned_by, assigned_at
+         FROM supply_assign_log${wA} ORDER BY assigned_at DESC LIMIT 2000`, argsA);
+    const qP = pool.query(
+      `SELECT id AS purchase_id, ing_id, ing, assign_type, assign_sum, qty, unit, total,
+              supplier, status, created_by, ts AS created_at, accepted_by, accepted_at, reject_reason
+         FROM purchases WHERE assign_type IS NOT NULL${wP ? ' AND ' + wP.slice(6) : ''} ORDER BY ts DESC LIMIT 2000`, argsP);
+    const [rA, rP] = await Promise.all([qA, qP]);
+    const entries = [
+      ...rA.rows.map(r => ({ stage: 'assigned', by: r.assigned_by, at: Number(new Date(r.assigned_at)), ...r, assigned_at: undefined })),
+      ...rP.rows.map(r => ({ stage: 'delivered', created_at: Number(r.created_at), accepted_at: r.accepted_at ? Number(r.accepted_at) : null, ...r }))
+    ].sort((a, b) => b.at - a.at || b.created_at - a.created_at);
+    res.json({ ok: true, entries });
   } catch (e) { res.status(500).json({ ok: false, error: String(e) }); }
 });
 
@@ -736,10 +807,14 @@ app.post('/stock/:id/receive', requireRole('MANAGER', 'BUYER'), async (req, res)
       const newQty = Number(it.qty) + qty;
       const newMax = (it.max == null || newQty > Number(it.max)) ? newQty : Number(it.max);
       await client.query('UPDATE stock SET qty=$1, max=$2, updated_at=now() WHERE id=$3', [newQty, newMax, it.id]);
+      const assignData = (await kvGet(PURCH_ASSIGN_KV, client)) || {};
+      const aEntry = assignData[it.id] || null;
+      const aType = aEntry && typeof aEntry === 'object' && aEntry.t === '🧾' ? '🧾' : (typeof aEntry === 'string' ? aEntry : null);
+      const aSum  = aEntry && typeof aEntry === 'object' && aEntry.t === '🧾' ? Number(aEntry.sum) || null : null;
       const p = (await client.query(
-        `INSERT INTO purchases (ing_id, ing, location, qty, unit, price, total, supplier, note, created_by)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`,
-        [it.id, it.name, it.location, qty, it.unit, price, qty * price, String(b.supplier || ''), String(b.note || ''), req.role])).rows[0];
+        `INSERT INTO purchases (ing_id, ing, location, qty, unit, price, total, supplier, note, created_by, assign_type, assign_sum)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id`,
+        [it.id, it.name, it.location, qty, it.unit, price, qty * price, String(b.supplier || ''), String(b.note || ''), req.role, aType, aSum])).rows[0];
       const media = Array.isArray(b.media) ? b.media.slice(0, 5) : [];
       for (const m of media) {
         if (!m || typeof m.url !== 'string') continue;
@@ -785,10 +860,14 @@ app.post('/stock/:id/deliver', requireRole('MANAGER', 'BUYER'), async (req, res)
     const price = Number(b.price) || 0;
     const it = (await pool.query('SELECT * FROM stock WHERE id=$1', [req.params.id])).rows[0];
     if (!it) return res.status(404).json({ ok: false, error: 'Позиция не найдена' });
+    const assignData = (await kvGet(PURCH_ASSIGN_KV)) || {};
+    const aEntry = assignData[it.id] || null;
+    const aType = aEntry && typeof aEntry === 'object' && aEntry.t === '🧾' ? '🧾' : (typeof aEntry === 'string' ? aEntry : null);
+    const aSum  = aEntry && typeof aEntry === 'object' && aEntry.t === '🧾' ? Number(aEntry.sum) || null : null;
     const p = (await pool.query(
-      `INSERT INTO purchases (ing_id, ing, location, qty, unit, price, total, supplier, note, created_by, status)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'pending') RETURNING id`,
-      [it.id, it.name, it.location, qty, it.unit, price, qty * price, String(b.supplier || ''), String(b.note || ''), req.role])).rows[0];
+      `INSERT INTO purchases (ing_id, ing, location, qty, unit, price, total, supplier, note, created_by, status, assign_type, assign_sum)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'pending',$11,$12) RETURNING id`,
+      [it.id, it.name, it.location, qty, it.unit, price, qty * price, String(b.supplier || ''), String(b.note || ''), req.role, aType, aSum])).rows[0];
     const media = Array.isArray(b.media) ? b.media.slice(0, 5) : [];
     for (const m of media) {
       if (!m || typeof m.url !== 'string') continue;
