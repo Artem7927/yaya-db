@@ -593,7 +593,7 @@ app.put('/purchase-assign', requireRole('MANAGER'), async (req, res) => {
     const assign = {};
     for (const k of Object.keys(src)) {
       const v = src[k];
-      if (v === '🛒' || v === '🚚') { assign[String(k)] = v; }
+      if (v === '🛒' || v === '🚚' || v === '🛍') { assign[String(k)] = v; }
       else if (v && typeof v === 'object' && v.t === '🧾') {
         const sum = Math.round(Number(v.sum) || 0);
         assign[String(k)] = sum > 0 ? { t: '🧾', sum } : '🛒';
@@ -650,13 +650,13 @@ app.get('/supply-log', requireRole('MANAGER'), async (req, res) => {
       `SELECT ing_id, ing, assign_type, assign_sum, assigned_by, assigned_at
          FROM supply_assign_log${wA} ORDER BY assigned_at DESC LIMIT 2000`, argsA);
     const qP = pool.query(
-      `SELECT id AS purchase_id, ing_id, ing, assign_type, assign_sum, qty, unit, total,
+      `SELECT id AS purchase_id, ing_id, ing, location, assign_type, assign_sum, qty, unit, total,
               supplier, status, created_by, ts AS created_at, accepted_by, accepted_at, reject_reason
          FROM purchases WHERE assign_type IS NOT NULL${wP ? ' AND ' + wP.slice(6) : ''} ORDER BY ts DESC LIMIT 2000`, argsP);
     const [rA, rP] = await Promise.all([qA, qP]);
     const entries = [
       ...rA.rows.map(r => ({ stage: 'assigned', by: r.assigned_by, at: Number(new Date(r.assigned_at)), ...r, assigned_at: undefined })),
-      ...rP.rows.map(r => ({ stage: 'delivered', created_at: Number(r.created_at), accepted_at: r.accepted_at ? Number(r.accepted_at) : null, ...r }))
+      ...rP.rows.map(r => ({ stage: 'delivered', location: r.location, created_at: Number(r.created_at), accepted_at: r.accepted_at ? Number(r.accepted_at) : null, ...r }))
     ].sort((a, b) => b.at - a.at || b.created_at - a.created_at);
     res.json({ ok: true, entries });
   } catch (e) { res.status(500).json({ ok: false, error: String(e) }); }
