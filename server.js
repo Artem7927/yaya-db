@@ -608,8 +608,8 @@ app.put('/purchase-assign', requireRole('MANAGER'), async (req, res) => {
       const curType = cur == null ? null : (typeof cur === 'object' && cur.t === '🧾' ? '🧾' : cur);
       const curSum  = cur != null && typeof cur === 'object' && cur.t === '🧾' ? Number(cur.sum) || 0 : null;
       if (oldType === curType && oldSum === curSum) continue;
-      const nameRow = (await pool.query('SELECT ing FROM stock WHERE id=$1', [id])).rows[0];
-      const ing = nameRow ? nameRow.ing : null;
+      const nameRow = (await pool.query('SELECT name FROM stock WHERE id=$1', [id])).rows[0];
+      const ing = nameRow ? nameRow.name : null;
       if (cur != null) {
         await pool.query(
           'INSERT INTO supply_assign_log (ing_id, ing, assign_type, assign_sum, assigned_by) VALUES ($1,$2,$3,$4,$5)',
