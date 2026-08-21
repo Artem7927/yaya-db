@@ -34,7 +34,7 @@ Node >=18, Express ^4.19, pg ^8.11 (Postgres), web-push ^3.6 (VAPID). Корен
 - PUT /kv/:key — MANAGER; курьер-токен — только yaya_order_couriers/yaya_courier_pos/yaya_couriers
 - POST /kv/:key/append — MANAGER (кроме публичного yaya_greet_req)
 - GET /purchase-assign — любая роль
-- PUT /purchase-assign — MANAGER
+- PUT /purchase-assign — MANAGER; значение позиции: строка '🚚'|'🛍'|'🛒' либо {t:'🧾',sum,performer}; performer сохраняется только из ['BUYER','MANAGER','SUPPLIER'] (иначе поле отбрасывается); sum≤0 → '🛒'
 - GET /settings — любая роль
 - PUT /settings — MANAGER
 - GET /keys — MANAGER
@@ -45,8 +45,10 @@ Node >=18, Express ^4.19, pg ^8.11 (Postgres), web-push ^3.6 (VAPID). Корен
 - DELETE /stock/:id — MANAGER/WORKSHOP/KITCHEN (+ гейт по location)
 - POST /stock/:id/receive — MANAGER/BUYER — приход на склад, покупка status=accepted
 - POST /stock/:id/deliver — MANAGER/BUYER — создаёт поставку status=pending (склад не меняется)
+  - оба INSERT в purchases пишут assign_type, assign_sum, performer из снимка assign-KV на момент проведения: performer = маппинг типа (🛍→BUYER, 🛒→MANAGER, 🚚→SUPPLIER) либо явный aEntry.performer для 🧾; created_by — роль токена
 - GET /purchases?status=&location=&from=&to= — любая роль; from/to — эпоха ms, полуинтервал [from,to) по ts (TIMESTAMPTZ), необязательны, комбинируются со status/location
 - GET /purchases/:id/media — любая роль
+- GET /supply-log?from=&to= — MANAGER — лента assigned (supply_assign_log) + delivered (purchases, assign_type NOT NULL); delivered-записи несут location, status (pending/accepted/rejected), performer, accepted_by, created_by; даты — epoch ms; фильтр по статусу — на клиенте
 - POST /deliveries/:id/accept — MANAGER/WORKSHOP/KITCHEN (+ гейт по location поставки), body.recv_qty — факт
 - POST /deliveries/:id/reject — MANAGER/WORKSHOP/KITCHEN (+ гейт по location), body.reason
 - POST /deliveries/:id/cancel — MANAGER/BUYER (только pending)
@@ -90,7 +92,7 @@ KV — межрепный контракт: yaya_menu (admin/kabinet→kitchen/k
 - Единая VAPID-пара: /push/public-key, /push/subscribe (KV yaya_push_subs), /push/notify-courier (MANAGER). Клиентские пуши — по номеру заказа: store.orders[<num>]. Роли-пуши — store.roles[kitchen|workshop|buyer].
 - PUT /kv/yaya_order_couriers триггерит пуши клиентам при смене delivery_status (on_way→'Курьер в пути', delivered→'Заказ доставлен'); /admin/reset-orders чистит этот ключ и store.orders.
 - Жизненный цикл заказа: new→cook→done→fulfilled (или cancel). Списание по yaya_tech_v3 — единожды при done (флаг deducted); cancel возвращает остатки. Нехватка ПФ кафе (location='kitchen') — списывается что есть, остаток логируется как 'НЕДОСТАЧА ПФ в кафе' и возвращается в shortage/deduct_shortage (вариант B).
-- initDb на старте: CREATE TABLE IF NOT EXISTS (kv, orders, stock, pf_stock, deductions, transfers, cook_log, production_log, purchases, purchase_media, deduction_media, access_keys, seq order_num_seq) → migrateSchema (pf_stock составной PK (id,location), колонки crit/max) → seedIfEmpty (сиды + бутстрап access_keys из ROLE_ENV) → migrateReadyR31; при ошибке — process.exit(1).
+- initDb на старте: CREATE TABLE IF NOT EXISTS (kv, orders, stock, pf_stock, deductions, transfers, cook_log, production_log, purchases, purchase_media, deduction_media, access_keys, seq order_num_seq) → migrateSchema (pf_stock составной PK (id,location), колонки crit/max) → идемпотентные ALTER TABLE purchases ADD COLUMN: assign_type, assign_sum, performer (TEXT) → seedIfEmpty (сиды + бутстрап access_keys из ROLE_ENV) → migrateReadyR31; при ошибке — process.exit(1).
 - Миграции фри: migrateReadyFries (r31→ready_s14, 1 порция=0.2кг) определена, но в initDb НЕ вызывается; активная — migrateReadyR31 (ready_s14→r31, с бэкапом yaya_flip_r31_backup_<ts>, при отсутствии техкарт — громкое падение).
 - Гейты по location: stock — WORKSHOP только 'workshop', KITCHEN только 'kitchen', MANAGER всё; /deliveries/:id accept|reject — по location поставки; PATCH /pf-stock/:id и /transfer — гейта location НЕТ.
 - Rate-limit в памяти (Map, ключ ip|path, сбрасывается при рестарте): /auth-check 20/мин, /next-order-num 30/мин, /order 20/мин, /orders/status 120/мин, /kv/:key/append 20/мин, /admin/reset-orders 3/мин.
