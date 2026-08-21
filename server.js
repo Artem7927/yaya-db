@@ -597,7 +597,8 @@ app.put('/purchase-assign', requireRole('MANAGER'), async (req, res) => {
       if (v === '🛒' || v === '🚚' || v === '🛍') { assign[String(k)] = v; }
       else if (v && typeof v === 'object' && v.t === '🧾') {
         const sum = Math.round(Number(v.sum) || 0);
-        assign[String(k)] = sum > 0 ? { t: '🧾', sum } : '🛒';
+        const perf = ['BUYER', 'MANAGER', 'SUPPLIER'].includes(v.performer) ? String(v.performer) : '';
+        assign[String(k)] = sum > 0 ? { t: '🧾', sum, ...(perf ? { performer: perf } : {}) } : '🛒';
       }
     }
     const allKeys = new Set([...Object.keys(oldAssign), ...Object.keys(assign)]);
