@@ -472,6 +472,7 @@ async function initDb() {
       CREATE INDEX IF NOT EXISTS idx_assign_log_at ON supply_assign_log(assigned_at DESC);
       ALTER TABLE purchases ADD COLUMN IF NOT EXISTS assign_type TEXT;
       ALTER TABLE purchases ADD COLUMN IF NOT EXISTS assign_sum  NUMERIC;
+      ALTER TABLE purchases ADD COLUMN IF NOT EXISTS performer   TEXT;
     `);
     await migrateSchema(client);
     await seedIfEmpty(client);
@@ -651,13 +652,13 @@ app.get('/supply-log', requireRole('MANAGER'), async (req, res) => {
          FROM supply_assign_log${wA} ORDER BY assigned_at DESC LIMIT 2000`, argsA);
     const qP = pool.query(
       `SELECT id AS purchase_id, ing_id, ing, location, assign_type, assign_sum, qty, unit, total,
-              supplier, status, created_by, ts AS created_at, accepted_by, accepted_at, reject_reason
+              supplier, status, created_by, ts AS created_at, accepted_by, accepted_at, reject_reason, performer
          FROM purchases WHERE assign_type IS NOT NULL${wP ? ' AND ' + wP.slice(6) : ''} ORDER BY ts DESC LIMIT 2000`, argsP);
     const [rA, rP] = await Promise.all([qA, qP]);
     const entries = [
       ...rA.rows.map(r => ({ stage: 'assigned', by: r.assigned_by, at: Number(new Date(r.assigned_at)), ...r, assigned_at: undefined })),
-      ...rP.rows.map(r => ({ stage: 'delivered', location: r.location, created_at: Number(r.created_at), accepted_at: r.accepted_at ? Number(r.accepted_at) : null, ...r }))
-    ].sort((a, b) => b.at - a.at || b.created_at - a.created_at);
+      ...rP.rows.map(r => ({ ...r, stage: 'delivered', location: r.location, created_at: Number(r.created_at), accepted_at: r.accepted_at ? Number(r.accepted_at) : null }))
+    ].sort((a, b) => ((b.at != null ? b.at : b.created_at)) - ((a.at != null ? a.at : a.created_at)));
     res.json({ ok: true, entries });
   } catch (e) { res.status(500).json({ ok: false, error: String(e) }); }
 });
@@ -811,10 +812,12 @@ app.post('/stock/:id/receive', requireRole('MANAGER', 'BUYER'), async (req, res)
       const aEntry = assignData[it.id] || null;
       const aType = aEntry && typeof aEntry === 'object' && aEntry.t === '🧾' ? '🧾' : (typeof aEntry === 'string' ? aEntry : null);
       const aSum  = aEntry && typeof aEntry === 'object' && aEntry.t === '🧾' ? Number(aEntry.sum) || null : null;
+      const PERF_BY_TYPE={'🛍':'BUYER','🛒':'MANAGER','🚚':'SUPPLIER'};
+      const aPerformer=(aEntry&&typeof aEntry==='object'&&aEntry.t==='🧾')?String(aEntry.performer||''):((aType&&PERF_BY_TYPE[aType])||'');
       const p = (await client.query(
-        `INSERT INTO purchases (ing_id, ing, location, qty, unit, price, total, supplier, note, created_by, assign_type, assign_sum)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id`,
-        [it.id, it.name, it.location, qty, it.unit, price, qty * price, String(b.supplier || ''), String(b.note || ''), req.role, aType, aSum])).rows[0];
+      `INSERT INTO purchases (ing_id, ing, location, qty, unit, price, total, supplier, note, created_by, assign_type, assign_sum, performer)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING id`,
+      [it.id, it.name, it.location, qty, it.unit, price, qty * price, String(b.supplier || ''), String(b.note || ''), req.role, aType, aSum, aPerformer])).rows[0];
       const media = Array.isArray(b.media) ? b.media.slice(0, 5) : [];
       for (const m of media) {
         if (!m || typeof m.url !== 'string') continue;
@@ -864,10 +867,12 @@ app.post('/stock/:id/deliver', requireRole('MANAGER', 'BUYER'), async (req, res)
     const aEntry = assignData[it.id] || null;
     const aType = aEntry && typeof aEntry === 'object' && aEntry.t === '🧾' ? '🧾' : (typeof aEntry === 'string' ? aEntry : null);
     const aSum  = aEntry && typeof aEntry === 'object' && aEntry.t === '🧾' ? Number(aEntry.sum) || null : null;
+    const PERF_BY_TYPE={'🛍':'BUYER','🛒':'MANAGER','🚚':'SUPPLIER'};
+    const aPerformer=(aEntry&&typeof aEntry==='object'&&aEntry.t==='🧾')?String(aEntry.performer||''):((aType&&PERF_BY_TYPE[aType])||'');
     const p = (await pool.query(
-      `INSERT INTO purchases (ing_id, ing, location, qty, unit, price, total, supplier, note, created_by, status, assign_type, assign_sum)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'pending',$11,$12) RETURNING id`,
-      [it.id, it.name, it.location, qty, it.unit, price, qty * price, String(b.supplier || ''), String(b.note || ''), req.role, aType, aSum])).rows[0];
+      `INSERT INTO purchases (ing_id, ing, location, qty, unit, price, total, supplier, note, created_by, status, assign_type, assign_sum, performer)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'pending',$11,$12,$13) RETURNING id`,
+      [it.id, it.name, it.location, qty, it.unit, price, qty * price, String(b.supplier || ''), String(b.note || ''), req.role, aType, aSum, aPerformer])).rows[0];
     const media = Array.isArray(b.media) ? b.media.slice(0, 5) : [];
     for (const m of media) {
       if (!m || typeof m.url !== 'string') continue;
