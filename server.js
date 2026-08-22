@@ -334,11 +334,11 @@ async function migrateSchema(client) {
     // status добавляем БЕЗ DEFAULT, старые записи (мгновенные передачи) помечаем 'accepted',
     // и только затем ставим DEFAULT 'pending' — иначе вся старая лента попала бы в pending.
     await client.query(`ALTER TABLE transfers ADD COLUMN IF NOT EXISTS status TEXT`);
-    await client.query(`UPDATE transfers SET status='accepted', accepted_at=COALESCE(accepted_at, ts) WHERE status IS NULL`);
-    await client.query(`ALTER TABLE transfers ALTER COLUMN status SET DEFAULT 'pending'`);
     await client.query(`ALTER TABLE transfers ADD COLUMN IF NOT EXISTS accepted_by TEXT`);
     await client.query(`ALTER TABLE transfers ADD COLUMN IF NOT EXISTS accepted_at TIMESTAMPTZ`);
     await client.query(`ALTER TABLE transfers ADD COLUMN IF NOT EXISTS performer TEXT`);
+    await client.query(`UPDATE transfers SET status='accepted', accepted_at=COALESCE(accepted_at, ts) WHERE status IS NULL`);
+    await client.query(`ALTER TABLE transfers ALTER COLUMN status SET DEFAULT 'pending'`);
     await client.query(`CREATE TABLE IF NOT EXISTS transfer_items (
       id          BIGSERIAL PRIMARY KEY,
       transfer_id BIGINT NOT NULL REFERENCES transfers(id),
