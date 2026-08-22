@@ -1020,7 +1020,7 @@ const JOURNAL_INS = {
 const JOURNAL_TBL = { deductions: 'deductions', transfers: 'transfers', 'cook-log': 'cook_log', 'production-log': 'production_log' };
 const JOURNAL_SEL = {
   deductions:       'id, ts, ing, qty, unit, reason, emp',
-  transfers:        'id, ts, dir, from_name, to_name, qty, unit, emp',
+  transfers:        'id, ts, dir, from_name, to_name, qty, unit, emp, status, performer, accepted_by',
   'cook-log':       'id, ts, dish_id, name, emoji, qty, spent_kg',
   'production-log': 'id, ts, name, batches, qty, unit, spent_kg',
 };
