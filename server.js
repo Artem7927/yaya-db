@@ -1051,6 +1051,18 @@ app.post('/pf-requests', requireRole('MANAGER', 'KITCHEN'), async (req, res) => 
   } catch (e) { res.status(500).json({ ok: false, error: String(e) }); }
 });
 
+// GET /pf-requests — список заявок (опц. ?status=open|sent|...); видят MANAGER/KITCHEN/WORKSHOP
+app.get('/pf-requests', requireRole('MANAGER', 'KITCHEN', 'WORKSHOP'), async (req, res) => {
+  try {
+    const st = req.query.status;
+    const { rows } = await pool.query(
+      `SELECT id, item_id, name, qty, unit, from_loc, status, created_at FROM pf_requests
+        WHERE ($1::text IS NULL OR status=$1) ORDER BY created_at DESC`,
+      [st || null]);
+    res.json({ ok: true, items: rows });
+  } catch (e) { res.status(500).json({ ok: false, error: String(e) }); }
+});
+
 // ── ЖУРНАЛЫ (append + чтение) ────────────────────────────────────────
 const JOURNAL_INS = {
   deductions:  'INSERT INTO deductions (ing, qty, unit, reason, emp) VALUES ($1,$2,$3,$4,$5)',
