@@ -489,6 +489,17 @@ async function initDb() {
         assigned_at  TIMESTAMPTZ DEFAULT now()
       );
       CREATE INDEX IF NOT EXISTS idx_assign_log_at ON supply_assign_log(assigned_at DESC);
+      CREATE TABLE IF NOT EXISTS pf_requests (
+        id         TEXT PRIMARY KEY,
+        item_id    TEXT NOT NULL,
+        name       TEXT NOT NULL,
+        qty        NUMERIC NOT NULL,
+        unit       TEXT NOT NULL DEFAULT 'шт.',
+        from_loc   TEXT NOT NULL DEFAULT 'kitchen',
+        status     TEXT NOT NULL DEFAULT 'open',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_pfreq_open ON pf_requests (item_id, from_loc) WHERE status='open';
       ALTER TABLE purchases ADD COLUMN IF NOT EXISTS assign_type TEXT;
       ALTER TABLE purchases ADD COLUMN IF NOT EXISTS assign_sum  NUMERIC;
       ALTER TABLE purchases ADD COLUMN IF NOT EXISTS performer   TEXT;
