@@ -1292,30 +1292,52 @@ app.post('/transfer', requireRole('MANAGER', 'WORKSHOP', 'KITCHEN'), async (req,
   try {
     const b = req.body || {};
     const dir = b.dir === 'ks-ws' ? 'ks-ws' : 'ws-ks';
-    // ── LEGACY: мгновенная передача Кухня→Цех (одним запросом, как раньше)
+    // ── МГНОВЕННАЯ ПАЧКА Кухня→Цех (списание кухни + зачисление цеху одним COMMIT, приёмки нет)
     if (dir === 'ks-ws') {
-      const qtyL = Number(b.qty);
-      if (!(qtyL > 0)) return res.status(400).json({ ok: false, error: 'Нужно количество > 0' });
+      let itemsL = Array.isArray(b.items) ? b.items : null;
+      if (!itemsL && b.fromId != null && b.fromId !== '') itemsL = [{ fromId: b.fromId, qty: b.qty }];
+      if (!itemsL || !itemsL.length) return res.status(400).json({ ok: false, error: 'Пустая пачка' });
+      const normL = [];
+      for (const it of itemsL) {
+        const q = Number(it && it.qty);
+        if (!(q > 0)) return res.status(400).json({ ok: false, error: 'Нужно количество > 0' });
+        const fid = String((it && it.fromId) || '').trim();
+        if (!fid) return res.status(400).json({ ok: false, error: 'Не указан полуфабрикат' });
+        normL.push({ fromId: fid, qty: q });
+      }
       const clientL = await pool.connect();
       try {
         await clientL.query('BEGIN');
-        const from = (await clientL.query("SELECT * FROM pf_stock WHERE id=$1 AND location='kitchen' FOR UPDATE", [b.fromId])).rows[0];
-        if (!from) { await clientL.query('ROLLBACK'); clientL.release(); return res.status(404).json({ ok: false, error: 'Нет полуфабриката: ' + b.fromId + ' (kitchen)' }); }
-        if (Number(from.qty) < qtyL) { await clientL.query('ROLLBACK'); clientL.release(); return res.status(400).json({ ok: false, error: 'Мало на складе: ' + from.name }); }
-        await clientL.query('UPDATE pf_stock SET qty=qty-$1, updated_at=now() WHERE id=$2 AND location=$3', [qtyL, b.fromId, 'kitchen']);
-        await clientL.query(
-          `INSERT INTO pf_stock (id,name,qty,unit,min,crit,location)
-           VALUES ($1,$2,$3,$4,$5,$6,'workshop')
-           ON CONFLICT (id,location) DO UPDATE SET qty=pf_stock.qty+EXCLUDED.qty, updated_at=now()`,
-          [b.fromId, from.name, qtyL, from.unit, from.min, from.crit]);
-        await clientL.query(`INSERT INTO transfers (dir, from_name, to_name, qty, unit, emp, status, accepted_by, accepted_at)
-          VALUES ('ks-ws',$1,$2,$3,$4,$5,'accepted',$5,now())`,
-          [from.name, from.name, qtyL, from.unit, req.role]);
-        await clientL.query('INSERT INTO deductions (ing, qty, unit, reason, emp) VALUES ($1,$2,$3,$4,$5)',
-          ['[КУХНЯ→ЦЕХ] ' + from.name, '+' + qtyL, from.unit, 'Передача', req.role]);
+        let total = 0; let unit = '';
+        const picked = [];
+        for (const it of normL) {
+          const from = (await clientL.query("SELECT * FROM pf_stock WHERE id=$1 AND location='kitchen' FOR UPDATE", [it.fromId])).rows[0];
+          if (!from) { await clientL.query('ROLLBACK'); clientL.release(); return res.status(404).json({ ok: false, error: 'Нет полуфабриката: ' + it.fromId + ' (kitchen)' }); }
+          if (Number(from.qty) < it.qty) { await clientL.query('ROLLBACK'); clientL.release(); return res.status(400).json({ ok: false, error: 'Мало на складе: ' + from.name }); }
+          await clientL.query('UPDATE pf_stock SET qty=qty-$1, updated_at=now() WHERE id=$2 AND location=$3', [it.qty, it.fromId, 'kitchen']);
+          picked.push({ id: it.fromId, name: from.name, qty: it.qty, unit: from.unit || '' });
+          total += it.qty;
+          if (!unit) unit = from.unit || '';
+        }
+        const headName = picked[0].name + (picked.length > 1 ? ' +' + (picked.length - 1) : '');
+        const headL = (await clientL.query(
+          `INSERT INTO transfers (dir, from_name, to_name, qty, unit, emp, status, accepted_by, accepted_at)
+           VALUES ('ks-ws',$1,$1,$2,$3,$4,'accepted',$4,now()) RETURNING id`,
+          [headName, total, unit, req.role])).rows[0];
+        for (const p of picked) {
+          await clientL.query(
+            `INSERT INTO pf_stock (id,name,qty,unit,min,crit,location)
+             VALUES ($1,$2,$3,$4,0,0,'workshop')
+             ON CONFLICT (id,location) DO UPDATE SET qty=pf_stock.qty+EXCLUDED.qty, updated_at=now()`,
+            [p.id, p.name, p.qty, p.unit]);
+          await clientL.query('INSERT INTO transfer_items (transfer_id, item_id, name, qty, unit) VALUES ($1,$2,$3,$4,$5)',
+            [headL.id, p.id, p.name, p.qty, p.unit]);
+          await clientL.query('INSERT INTO deductions (ing, qty, unit, reason, emp) VALUES ($1,$2,$3,$4,$5)',
+            ['[КУХНЯ→ЦЕХ] ' + p.name, '+' + p.qty, p.unit, 'Передача', req.role]);
+        }
         await clientL.query('COMMIT');
         clientL.release();
-        return res.json({ ok: true });
+        return res.json({ ok: true, transfer_id: headL.id, count: picked.length });
       } catch (e) { try { await clientL.query('ROLLBACK'); clientL.release(); } catch (_) {} return res.status(500).json({ ok: false, error: String(e) }); }
     }
     // ── ДВУХФАЗНАЯ ПАЧКА Цех→Кухня (pending; зачисление кухне на accept)
