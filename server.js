@@ -1061,8 +1061,18 @@ app.post('/transfers', requireRole('MANAGER', 'WORKSHOP', 'KITCHEN'), async (req
 });
 app.get('/transfers', requireAnyRole, async (req, res) => {
   try {
-    const { rows } = await pool.query('SELECT ' + JOURNAL_SEL.transfers + ' FROM transfers ORDER BY ts DESC LIMIT 2000');
-    res.json({ ok: true, items: rows.map(r => ({ ...r, ts: Number(r.ts) })) });
+    const { rows } = await pool.query("SELECT " + JOURNAL_SEL.transfers + " FROM transfers WHERE status <> 'pending' ORDER BY ts DESC LIMIT 2000");
+    const ids = rows.map(r => r.id);
+    const byT = new Map();
+    if (ids.length) {
+      const its = (await pool.query('SELECT transfer_id, item_id, name, qty, unit FROM transfer_items WHERE transfer_id = ANY($1)', [ids])).rows;
+      for (const it of its) {
+        let arr = byT.get(it.transfer_id);
+        if (!arr) { arr = []; byT.set(it.transfer_id, arr); }
+        arr.push({ item_id: it.item_id, name: it.name, qty: Number(it.qty), unit: it.unit });
+      }
+    }
+    res.json({ ok: true, items: rows.map(r => ({ ...r, ts: Number(r.ts), pf_items: byT.get(r.id) || [] })) });
   } catch (e) { res.status(500).json({ ok: false, error: String(e) }); }
 });
 
