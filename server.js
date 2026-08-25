@@ -500,6 +500,17 @@ async function initDb() {
         created_at TIMESTAMPTZ NOT NULL DEFAULT now()
       );
       CREATE UNIQUE INDEX IF NOT EXISTS idx_pfreq_open ON pf_requests (item_id, from_loc) WHERE status='open';
+      CREATE TABLE IF NOT EXISTS buy_snapshots (
+        snap_date DATE NOT NULL,
+        item_id   TEXT NOT NULL,
+        name      TEXT NOT NULL,
+        qty       NUMERIC NOT NULL,
+        min       NUMERIC NOT NULL,
+        need      NUMERIC NOT NULL,
+        unit      TEXT NOT NULL DEFAULT 'шт.',
+        location  TEXT NOT NULL DEFAULT 'kitchen',
+        PRIMARY KEY (snap_date, item_id)
+      );
       ALTER TABLE purchases ADD COLUMN IF NOT EXISTS assign_type TEXT;
       ALTER TABLE purchases ADD COLUMN IF NOT EXISTS assign_sum  NUMERIC;
       ALTER TABLE purchases ADD COLUMN IF NOT EXISTS performer   TEXT;
@@ -742,6 +753,32 @@ function stockAccess(role, item) {
   return false;
 }
 
+async function ensureSnapshot() {
+  try {
+    const exists = await pool.query("SELECT 1 FROM buy_snapshots WHERE snap_date=CURRENT_DATE LIMIT 1");
+    if (exists.rows.length) return;
+    const { rows: low } = await pool.query(
+      `SELECT id, name, qty, unit, min, location FROM stock
+       WHERE qty < min * 1.5 AND min > 0`
+    );
+    if (!low.length) return;
+    const vals = [];
+    const params = [];
+    let p = 1;
+    for (const r of low) {
+      const need = Math.round((r.min * 1.5 - r.qty) * 100) / 100;
+      if (need <= 0) continue;
+      vals.push(`(CURRENT_DATE,$${p++},$${p++},$${p++},$${p++},$${p++},$${p++},$${p++})`);
+      params.push(r.id, r.name, r.qty, r.min, need, r.unit || 'шт.', r.location || 'kitchen');
+    }
+    if (!vals.length) return;
+    await pool.query(
+      `INSERT INTO buy_snapshots (snap_date,item_id,name,qty,min,need,unit,location) VALUES ${vals.join(',')}`,
+      params
+    );
+  } catch (e) { console.error('ensureSnapshot error:', e.message); }
+}
+
 app.get('/stock', requireAnyRole, async (req, res) => {
   try {
     const loc = req.query.location;
@@ -749,6 +786,24 @@ app.get('/stock', requireAnyRole, async (req, res) => {
       `SELECT id, name, qty, unit, min, crit, max, location, updated_at FROM stock
         WHERE ($1::text IS NULL OR location=$1) ORDER BY id`,
       [loc || null]);
+    ensureSnapshot();
+    res.json({ ok: true, items: rows });
+  } catch (e) { res.status(500).json({ ok: false, error: String(e) }); }
+});
+
+app.get('/buy-snapshots/dates', requireRole('MANAGER', 'BUYER'), async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT DISTINCT snap_date FROM buy_snapshots ORDER BY snap_date DESC');
+    res.json({ ok: true, dates: rows.map(r => r.snap_date) });
+  } catch (e) { res.status(500).json({ ok: false, error: String(e) }); }
+});
+
+app.get('/buy-snapshots', requireRole('MANAGER', 'BUYER'), async (req, res) => {
+  try {
+    const d = req.query.date || null;
+    const { rows } = await pool.query(
+      'SELECT * FROM buy_snapshots WHERE snap_date=COALESCE($1::date,CURRENT_DATE) ORDER BY need DESC',
+      [d]);
     res.json({ ok: true, items: rows });
   } catch (e) { res.status(500).json({ ok: false, error: String(e) }); }
 });
