@@ -800,11 +800,32 @@ app.get('/buy-snapshots/dates', requireRole('MANAGER', 'BUYER'), async (req, res
 
 app.get('/buy-snapshots', requireRole('MANAGER', 'BUYER'), async (req, res) => {
   try {
+    const period = req.query.period || 'day';
+    if (period === 'month') {
+      const ym = req.query.ym;
+      if (!ym || !/^\d{4}-\d{2}$/.test(ym)) return res.status(400).json({ ok: false, error: 'ym=YYYY-MM required' });
+      const key = ym + '-01';
+      const { rows } = await pool.query(
+        `SELECT item_id, MAX(name) name, MAX(need) need, MAX(min) min, MAX(unit) unit, MAX(location) location
+         FROM buy_snapshots WHERE date_trunc('month',snap_date)=$1::date GROUP BY item_id ORDER BY need DESC`,
+        [key]);
+      return res.json({ ok: true, items: rows, period: 'month', key: ym });
+    }
+    if (period === 'year') {
+      const y = req.query.y;
+      if (!y || !/^\d{4}$/.test(y)) return res.status(400).json({ ok: false, error: 'y=YYYY required' });
+      const key = y + '-01-01';
+      const { rows } = await pool.query(
+        `SELECT item_id, MAX(name) name, MAX(need) need, MAX(min) min, MAX(unit) unit, MAX(location) location
+         FROM buy_snapshots WHERE date_trunc('year',snap_date)=$1::date GROUP BY item_id ORDER BY need DESC`,
+        [key]);
+      return res.json({ ok: true, items: rows, period: 'year', key: y });
+    }
     const d = req.query.date || null;
     const { rows } = await pool.query(
       'SELECT * FROM buy_snapshots WHERE snap_date=COALESCE($1::date,CURRENT_DATE) ORDER BY need DESC',
       [d]);
-    res.json({ ok: true, items: rows });
+    res.json({ ok: true, items: rows, period: 'day', key: d || new Date().toISOString().slice(0, 10) });
   } catch (e) { res.status(500).json({ ok: false, error: String(e) }); }
 });
 
