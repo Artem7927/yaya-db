@@ -78,6 +78,19 @@ Node >=18, Express ^4.19, pg ^8.11 (Postgres), web-push ^3.6 (VAPID). Корен
 - POST /push/notify-courier — MANAGER
 - POST /push/test — MANAGER
 
+### Таблицы pf_requests и buy_snapshots (сессия 2026-08)
+
+**pf_requests** — заявки кухни цеху на дослать ПФ до нормы. Колонки: id (TEXT PK), item_id, name, qty, unit, from_loc (DEFAULT 'kitchen'), status (open|done, DEFAULT 'open'), created_at. Партиал-индекс `idx_pfreq_open` на `(item_id, from_loc) WHERE status='open'` — одна открытая заявка на ПФ+локацию.
+
+- POST /pf-requests (MANAGER, KITCHEN): body `{item_id}`. Читает pf_stock(kitchen), считает `need=round(min*1.5 − qty)`, need≤0 → `{ok,skip:true}`. UPSERT открытой заявки: сначала UPDATE qty, если 0 строк → INSERT (id='pfr'+Date.now()+rand). Не ON CONFLICT — индекс партиальный, не детерминирует INSERT.
+- GET /pf-requests (MANAGER, KITCHEN, WORKSHOP): `?status` фильтр, ORDER BY created_at DESC. АВТО-ЗАКРЫТИЕ: перед SELECT — UPDATE open→done для заявок, где pf_stock(kitchen) вышел в норму (`min>0 AND qty>=min*1.5`). UPDATE обёрнут в inner try/catch — падение не роняет GET, SELECT отдаёт актуальный список. Так заявки гаснут сами, когда цех дошлёт ПФ и кухня примет.
+
+**buy_snapshots** — дневные снимки дефицита закупки. Колонки: snap_date (DATE), item_id, name, qty, min, need, unit, location. PK `(snap_date, item_id)`.
+
+- ensureSnapshot() вызывается fire-and-forget из GET /stock: при первом заходе за день (нет строк за CURRENT_DATE) фиксирует срез дефицита (`qty < min*1.5 AND min>0, need>0`). Идемпотентна. Крона нет — снимок = первый заход дня; нет захода = нет снимка за день. История копится только с деплоя, задним числом не наполняется.
+- GET /buy-snapshots (MANAGER, BUYER): period=day (`?date=YYYY-MM-DD`, дефолт сегодня) / month (`?ym=YYYY-MM`) / year (`?y=YYYY`). month/year — агрегат `MAX(need)` по item_id (пиковая потребность за период).
+- GET /buy-snapshots/dates (MANAGER, BUYER): DISTINCT snap_date.
+
 ## 5. Внешние связи — кто обращается к серверу
 Все 4 фронтенда обращаются к ОДНОМУ серверу (один Postgres, один VAPID):
 - yaya-kitchen (public): POST /order, GET /next-order-num, GET /orders/status, GET/PUT /kv/* (yaya_menu, yaya_banners, yaya_tv*, yaya_greet_req), /push/public-key, /push/subscribe.
@@ -105,3 +118,4 @@ KV — межрепный контракт: yaya_menu (admin/kabinet→kitchen/k
 - GET /orders для курьера: фильтр по нормализованному имени (lowercase, ё→е, схлопывание пробелов) из X-Courier-Name/?me против yaya_order_couriers[<id>].courier; к env-курьеру применимо так же.
 - /auth-check: ADMIN_TOKEN→role 'admin', MANAGER_TOKEN→'MANAGER', courier_token→'courier' (lowercase), токены access_keys→своя роль; AUTH_ON = наличие ADMIN/MANAGER env.
 - express.json limit '2mb'; app.set('trust proxy', 1); OPTIONS → 204.
+- Гонка двух параллельных POST /pf-requests по одному item_id: второй ловит UNIQUE-violation `idx_pfreq_open` → 500. Данные целы, дубля нет; редкий кейс (одна кухня, два клика в секунду).
