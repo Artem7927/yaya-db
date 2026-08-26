@@ -1727,7 +1727,7 @@ function pushStatusLabel(status) {
 }
 
 // POST /orders/:id/status { status } — жизненный цикл заказа
-app.post('/orders/:id/status', requireRole('MANAGER', 'SUPERVISOR', 'ASSEMBLER'), async (req, res) => {
+app.post('/orders/:id/status', requireRole('MANAGER', 'SUPERVISOR', 'ASSEMBLER', 'KITCHEN'), async (req, res) => {
   try {
     const id = req.params.id;
     const status = String(req.body.status || '');
