@@ -1097,32 +1097,57 @@ app.patch('/pf-stock/:id', requireRole('MANAGER', 'WORKSHOP', 'KITCHEN'), async 
   } catch (e) { res.status(500).json({ ok: false, error: String(e) }); }
 });
 
-// POST /pf-requests — заявка кухни цеху: дослать ПФ до нормы (min*1.5 минус остаток)
-// body: { item_id } — открытая заявка одна на (item_id, 'kitchen') [idx_pfreq_open], повтор — обновляет qty
+// POST /pf-requests — заявка кухни цеху на ПФ
+// body: { item_id, qty? } — qty>0 = явная потребность (списали при готовке, накопление);
+//       qty не пришло = авто-добор до нормы (min*1.5 − остаток, перезапись).
+// Открытая заявка одна на (item_id, 'kitchen') [idx_pfreq_open].
 app.post('/pf-requests', requireRole('MANAGER', 'KITCHEN'), async (req, res) => {
   try {
     const itemId = String((req.body || {}).item_id || '').trim();
     if (!itemId) return res.status(400).json({ ok: false, error: 'Нет item_id' });
+    const explicitQty = Number((req.body || {}).qty);
+    const isExplicit = Number.isFinite(explicitQty) && explicitQty > 0;
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
       const pf = (await client.query('SELECT * FROM pf_stock WHERE id=$1 AND location=$2', [itemId, 'kitchen'])).rows[0];
       if (!pf) { await client.query('ROLLBACK'); client.release(); return res.status(404).json({ ok: false, error: 'Нет ПФ на кухне: ' + itemId }); }
-      const norm = Number(pf.min) * 1.5;
-      const need = Math.round((norm - Number(pf.qty)) * 100) / 100;
-      if (need <= 0) { await client.query('ROLLBACK'); client.release(); return res.json({ ok: true, skip: true }); }
-      const upd = await client.query(
-        `UPDATE pf_requests SET qty=$1, created_at=now() WHERE item_id=$2 AND from_loc='kitchen' AND status='open'`,
-        [need, itemId]);
-      if (!upd.rowCount) {
-        const id = 'pfr' + Date.now() + Math.floor(Math.random() * 1000);
-        await client.query(
-          `INSERT INTO pf_requests (id, item_id, name, qty, unit, from_loc, status) VALUES ($1,$2,$3,$4,$5,'kitchen','open')`,
-          [id, itemId, pf.name, need, pf.unit]);
+      let need;
+      if (isExplicit) {
+        need = Math.round(explicitQty * 100) / 100;
+      } else {
+        const norm = Number(pf.min) * 1.5;
+        need = Math.round((norm - Number(pf.qty)) * 100) / 100;
+        if (need <= 0) { await client.query('ROLLBACK'); client.release(); return res.json({ ok: true, skip: true }); }
+      }
+      let finalQty;
+      if (isExplicit) {
+        const upd = await client.query(
+          `UPDATE pf_requests SET qty = qty + $1, created_at=now() WHERE item_id=$2 AND from_loc='kitchen' AND status='open' RETURNING qty`,
+          [need, itemId]);
+        if (upd.rowCount) { finalQty = Number(upd.rows[0].qty); }
+        else {
+          finalQty = need;
+          const id = 'pfr' + Date.now() + Math.floor(Math.random() * 1000);
+          await client.query(
+            `INSERT INTO pf_requests (id, item_id, name, qty, unit, from_loc, status) VALUES ($1,$2,$3,$4,$5,'kitchen','open')`,
+            [id, itemId, pf.name, need, pf.unit]);
+        }
+      } else {
+        const upd = await client.query(
+          `UPDATE pf_requests SET qty=$1, created_at=now() WHERE item_id=$2 AND from_loc='kitchen' AND status='open'`,
+          [need, itemId]);
+        finalQty = need;
+        if (!upd.rowCount) {
+          const id = 'pfr' + Date.now() + Math.floor(Math.random() * 1000);
+          await client.query(
+            `INSERT INTO pf_requests (id, item_id, name, qty, unit, from_loc, status) VALUES ($1,$2,$3,$4,$5,'kitchen','open')`,
+            [id, itemId, pf.name, need, pf.unit]);
+        }
       }
       await client.query('COMMIT');
       client.release();
-      res.json({ ok: true, item_id: itemId, name: pf.name, qty: need });
+      res.json({ ok: true, item_id: itemId, name: pf.name, qty: finalQty });
     } catch (e) { await client.query('ROLLBACK'); client.release(); throw e; }
   } catch (e) { res.status(500).json({ ok: false, error: String(e) }); }
 });
