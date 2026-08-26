@@ -1130,6 +1130,18 @@ app.post('/pf-requests', requireRole('MANAGER', 'KITCHEN'), async (req, res) => 
 // GET /pf-requests — список заявок (опц. ?status=open|sent|...); видят MANAGER/KITCHEN/WORKSHOP
 app.get('/pf-requests', requireRole('MANAGER', 'KITCHEN', 'WORKSHOP'), async (req, res) => {
   try {
+    try {
+      await pool.query(
+        `UPDATE pf_requests r SET status='done'
+         WHERE r.status='open'
+           AND EXISTS (
+             SELECT 1 FROM pf_stock p
+             WHERE p.id = r.item_id
+               AND p.location = r.from_loc
+               AND p.min > 0
+               AND p.qty >= p.min * 1.5
+           )`);
+    } catch (_) {}
     const st = req.query.status;
     const { rows } = await pool.query(
       `SELECT id, item_id, name, qty, unit, from_loc, status, created_at FROM pf_requests
