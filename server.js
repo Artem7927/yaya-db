@@ -1173,31 +1173,23 @@ app.post('/pf-requests', requireRole('MANAGER', 'KITCHEN'), async (req, res) => 
         need = Math.round((norm - Number(pf.qty)) * 100) / 100;
         if (need <= 0) { await client.query('ROLLBACK'); client.release(); return res.json({ ok: true, skip: true }); }
       }
-      let finalQty;
-      if (isExplicit) {
-        const upd = await client.query(
-          `UPDATE pf_requests SET qty = qty + $1, created_at=now() WHERE item_id=$2 AND from_loc='kitchen' AND status='open' RETURNING qty`,
-          [need, itemId]);
-        if (upd.rowCount) { finalQty = Number(upd.rows[0].qty); }
-        else {
-          finalQty = need;
-          const id = 'pfr' + Date.now() + Math.floor(Math.random() * 1000);
-          await client.query(
-            `INSERT INTO pf_requests (id, item_id, name, qty, unit, from_loc, status) VALUES ($1,$2,$3,$4,$5,'kitchen','open')`,
-            [id, itemId, pf.name, need, pf.unit]);
-        }
-      } else {
-        const upd = await client.query(
-          `UPDATE pf_requests SET qty=$1, created_at=now() WHERE item_id=$2 AND from_loc='kitchen' AND status='open'`,
-          [need, itemId]);
-        finalQty = need;
-        if (!upd.rowCount) {
-          const id = 'pfr' + Date.now() + Math.floor(Math.random() * 1000);
-          await client.query(
-            `INSERT INTO pf_requests (id, item_id, name, qty, unit, from_loc, status) VALUES ($1,$2,$3,$4,$5,'kitchen','open')`,
-            [id, itemId, pf.name, need, pf.unit]);
-        }
-      }
+      // Атомарный апсерт открытой заявки через партиал-таргет ON CONFLICT
+      // (idx_pfreq_open: (item_id, from_loc) WHERE status='open').
+      // Параллельный POST на тот же (item_id,'kitchen') больше НЕ падает в UNIQUE -> 500,
+      // а идемпотентно обновляет единственную open-строку: explicit — накапливает qty,
+      // авто-need — перезаписывает. Итог: ровно 1 open-строка на item, всем ответам 200.
+      const id = 'pfr' + Date.now() + Math.floor(Math.random() * 1000);
+      const conflictDo = isExplicit
+        ? 'qty = pf_requests.qty + EXCLUDED.qty, created_at = now()'
+        : 'qty = EXCLUDED.qty, created_at = now()';
+      const ups = await client.query(
+        `INSERT INTO pf_requests (id, item_id, name, qty, unit, from_loc, status)
+         VALUES ($1,$2,$3,$4,$5,'kitchen','open')
+         ON CONFLICT (item_id, from_loc) WHERE status='open'
+         DO UPDATE SET ${conflictDo}
+         RETURNING qty`,
+        [id, itemId, pf.name, need, pf.unit]);
+      const finalQty = Number(ups.rows[0].qty);
       await client.query('COMMIT');
       client.release();
       res.json({ ok: true, item_id: itemId, name: pf.name, qty: finalQty });
