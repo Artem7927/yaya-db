@@ -80,10 +80,13 @@ Node >=18, Express ^4.19, pg ^8.11 (Postgres), web-push ^3.6 (VAPID). Корен
 
 ### Таблицы pf_requests и buy_snapshots (сессия 2026-08)
 
-**pf_requests** — заявки кухни цеху на дослать ПФ до нормы. Колонки: id (TEXT PK), item_id, name, qty, unit, from_loc (DEFAULT 'kitchen'), status (open|done, DEFAULT 'open'), created_at. Партиал-индекс `idx_pfreq_open` на `(item_id, from_loc) WHERE status='open'` — одна открытая заявка на ПФ+локацию.
+**pf_requests** — заявки кухни цеху на дослать ПФ до нормы. Колонки: id (TEXT PK), item_id, name, qty, unit, from_loc (DEFAULT 'kitchen'), status (open|done|expired, DEFAULT 'open'), created_at, closed_at (TIMESTAMPTZ, NULL), close_reason ('fulfilled'). Партиал-индекс `idx_pfreq_open` на `(item_id, from_loc) WHERE status='open'` — одна открытая заявка на ПФ+локацию. Миграция в initDb: `ALTER TABLE pf_requests ADD COLUMN IF NOT EXISTS closed_at/close_reason` (идемпотентно; колонки пишутся только после ADD).
 
 - POST /pf-requests (MANAGER, KITCHEN): body `{item_id}`. Читает pf_stock(kitchen), считает `need=round(min*1.5 − qty)`, need≤0 → `{ok,skip:true}`. UPSERT открытой заявки: сначала UPDATE qty, если 0 строк → INSERT (id='pfr'+Date.now()+rand). Не ON CONFLICT — индекс партиальный, не детерминирует INSERT.
-- GET /pf-requests (MANAGER, KITCHEN, WORKSHOP): `?status` фильтр, ORDER BY created_at DESC. АВТО-ЗАКРЫТИЕ: перед SELECT — UPDATE open→done для заявок, где pf_stock(kitchen) вышел в норму (`min>0 AND qty>=min*1.5`). UPDATE обёрнут в inner try/catch — падение не роняет GET, SELECT отдаёт актуальный список. Так заявки гаснут сами, когда цех дошлёт ПФ и кухня примет.
+- ГУК-АВТО-ЗАКРЫТИЕ (основной механизм): `closeFulfilledPfRequests(client, itemId?, location='kitchen')` вызывается внутри той же транзакции ПОСЛЕ прироста кухонного ПФ — атомарно с ним (PATCH /pf-stock/:id по item, POST /transfers/:id/accept — вся пачка, POST /cook — выход ready). Предикат: `status='open' AND from_loc=loc AND pf_stock(min>0, qty>=min*1.5)` → `status='done', closed_at=now(), close_reason='fulfilled'`. Идемпотентно (трогает только open; повторный вызов закрытые не трогает).
+- GET /pf-requests (MANAGER, KITCHEN, WORKSHOP): `?status` фильтр, ORDER BY created_at DESC. СТРАХОВКА (не роняет GET, inner try/catch): перед SELECT — тот же UPDATE open→done с closed_at/close_reason для покрытых заявок. SELECT отдаёт id,item_id,name,qty,unit,from_loc,status,created_at,closed_at,close_reason. Так заявки гаснут даже при пропуске гука.
+- TTL (ВЫКЛ, заготовка): `PF_REQ_TTL_MS=null` — если включить, `refreshClosingSafetyNet` переводит давно не закрытые open в отдельный статус 'expired' (НЕ 'done'/'closed' — не смешивать). `refreshClosingSafetyNet()` вызывается разово при старте (после initDb) как бэкфилл fulfilled с closed_at.
+
 
 **buy_snapshots** — дневные снимки дефицита закупки. Колонки: snap_date (DATE), item_id, name, qty, min, need, unit, location. PK `(snap_date, item_id)`.
 

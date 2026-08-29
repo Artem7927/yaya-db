@@ -514,6 +514,8 @@ async function initDb() {
       ALTER TABLE purchases ADD COLUMN IF NOT EXISTS assign_type TEXT;
       ALTER TABLE purchases ADD COLUMN IF NOT EXISTS assign_sum  NUMERIC;
       ALTER TABLE purchases ADD COLUMN IF NOT EXISTS performer   TEXT;
+      ALTER TABLE pf_requests ADD COLUMN IF NOT EXISTS closed_at       TIMESTAMPTZ;
+      ALTER TABLE pf_requests ADD COLUMN IF NOT EXISTS close_reason    TEXT;
     `);
     await migrateSchema(client);
     await seedIfEmpty(client);
@@ -1073,6 +1075,56 @@ app.get('/pf-stock', requireAnyRole, async (req, res) => {
   } catch (e) { res.status(500).json({ ok: false, error: String(e) }); }
 });
 
+// TTL-«протухание» заявок: выключено. Если включить позже — открытые заявки, не
+// закрытые за PF_REQ_TTL_MS, переводятся в отдельный статус 'expired'
+// (НЕ 'closed'/'done' — не смешивать с фирменным закрытием). По умолчанию off.
+const PF_REQ_TTL_MS = null; // например 24*3600*1000; null => выключено
+
+// закрыть open-заявки кухни, чья нехватка уже покрыта (pf_stock вышел в норму).
+// Вызывается из транзакции тем же client ПОСЛЕ прироста кухонного ПФ — атомарно с ним.
+// Предикат идентичен авто-закрытию в GET /pf-requests: min>0 AND qty>=min*1.5.
+// Идемпотентно: трогает только status='open' (повторный вызов закрытые 'done' не трогает).
+// itemId — сузить до конкретной позиции (иначе NULL = все). location — по умолчанию 'kitchen'.
+async function closeFulfilledPfRequests(client, itemId, location) {
+  const loc = location || 'kitchen';
+  await client.query(
+    `UPDATE pf_requests r
+       SET status='done', closed_at=COALESCE(closed_at, now()), close_reason='fulfilled'
+     WHERE r.status='open'
+       AND r.from_loc = $2::text
+       AND ($1::text IS NULL OR r.item_id = $1)
+       AND EXISTS (
+         SELECT 1 FROM pf_stock p
+         WHERE p.id = r.item_id AND p.location = $2::text
+           AND p.min > 0 AND p.qty >= p.min * 1.5
+       )`,
+    [itemId || null, loc]);
+}
+async function expireStalePfRequests(client) {
+  // TTL: пока выключено (PF_REQ_TTL_MS === null → сюда не заходим).
+  if (PF_REQ_TTL_MS === null) return;
+  await client.query(
+    `UPDATE pf_requests r
+       SET status='expired'
+     WHERE r.status='open'
+       AND r.created_at < now() - ($1::text || ' milliseconds')::interval`,
+    [String(PF_REQ_TTL_MS)]);
+}
+async function refreshClosingSafetyNet() {
+  // страховочный прогон вне транзакций: закрывает открытые заявки, чья норма уже
+  // покрыта (пишет closed_at/close_reason), и — когда включён флаг — протухшие → 'expired'.
+  try {
+    const cl = await pool.connect();
+    try {
+      await cl.query('BEGIN');
+      await closeFulfilledPfRequests(cl, null, 'kitchen');
+      await expireStalePfRequests(cl);
+      await cl.query('COMMIT');
+    } catch (e2) { try { await cl.query('ROLLBACK'); } catch (_) {} }
+    finally { cl.release(); }
+  } catch (_) {}
+}
+
 // PATCH /pf-stock/:id — установить точный остаток ПФ (Пересчёт)
 // body: { qty }
 app.patch('/pf-stock/:id', requireRole('MANAGER', 'WORKSHOP', 'KITCHEN'), async (req, res) => {
@@ -1088,6 +1140,7 @@ app.patch('/pf-stock/:id', requireRole('MANAGER', 'WORKSHOP', 'KITCHEN'), async 
       if (!it) { await client.query('ROLLBACK'); client.release(); return res.status(404).json({ ok: false, error: 'Позиция не найдена' }); }
       const delta = newQty - Number(it.qty);
       await client.query('UPDATE pf_stock SET qty=$1, updated_at=now() WHERE id=$2', [newQty, id]);
+      await closeFulfilledPfRequests(client, id, 'kitchen');
       await client.query('INSERT INTO deductions (ing, qty, unit, reason, emp) VALUES ($1,$2,$3,$4,$5)',
         [it.name, (delta >= 0 ? '+' : '') + Number(delta.toFixed(4)), it.unit, 'Инвентаризация ПФ', b.emp || req.role]);
       await client.query('COMMIT');
@@ -1157,7 +1210,7 @@ app.get('/pf-requests', requireRole('MANAGER', 'KITCHEN', 'WORKSHOP'), async (re
   try {
     try {
       await pool.query(
-        `UPDATE pf_requests r SET status='done'
+        `UPDATE pf_requests r SET status='done', closed_at=COALESCE(closed_at, now()), close_reason='fulfilled'
          WHERE r.status='open'
            AND EXISTS (
              SELECT 1 FROM pf_stock p
@@ -1169,7 +1222,7 @@ app.get('/pf-requests', requireRole('MANAGER', 'KITCHEN', 'WORKSHOP'), async (re
     } catch (_) {}
     const st = req.query.status;
     const { rows } = await pool.query(
-      `SELECT id, item_id, name, qty, unit, from_loc, status, created_at FROM pf_requests
+      `SELECT id, item_id, name, qty, unit, from_loc, status, created_at, closed_at, close_reason FROM pf_requests
         WHERE ($1::text IS NULL OR status=$1) ORDER BY created_at DESC`,
       [st || null]);
     res.json({ ok: true, items: rows });
@@ -1258,6 +1311,7 @@ app.post('/transfers/:id/accept', requireRole('MANAGER', 'KITCHEN'), async (req,
          ON CONFLICT (id,location) DO UPDATE SET qty=pf_stock.qty+EXCLUDED.qty, updated_at=now()`,
         [it.item_id, it.name, it.qty, it.unit]);
     }
+    await closeFulfilledPfRequests(client, null, 'kitchen');
     await client.query("UPDATE transfers SET status='accepted', accepted_by=$2, accepted_at=now() WHERE id=$1",
       [req.params.id, req.role]);
     await client.query('COMMIT');
@@ -1435,6 +1489,7 @@ app.post('/cook', requireRole('MANAGER', 'KITCHEN'), async (req, res) => {
            COALESCE((SELECT min FROM pf_stock WHERE id=$1 AND location='kitchen'),0), 'kitchen')
          ON CONFLICT (id,location) DO UPDATE SET qty=pf_stock.qty+EXCLUDED.qty, updated_at=now()`,
         [outId, name, outN, prep.outputUnit || 'шт.']);
+      await closeFulfilledPfRequests(client, null, 'kitchen');
       await client.query(
         'INSERT INTO cook_log (dish_id, name, emoji, qty, spent_kg) VALUES ($1,$2,$3,$4,$5)',
         [dishId, name, emoji, N, Number(spent.toFixed(4))]);
@@ -1923,5 +1978,5 @@ app.get('/health', (req, res) => res.json({ ok: true, auth: AUTH_ON, push: PUSH_
 
 const PORT = process.env.PORT || 3000;
 initDb()
-  .then(() => app.listen(PORT, () => console.log('YaYa backend on', PORT)))
+  .then(() => { app.listen(PORT, () => console.log('YaYa backend on', PORT)); refreshClosingSafetyNet(); })
   .catch(e => { console.error('DB init failed', e); process.exit(1); });
