@@ -500,6 +500,21 @@ async function initDb() {
         created_at TIMESTAMPTZ NOT NULL DEFAULT now()
       );
       CREATE UNIQUE INDEX IF NOT EXISTS idx_pfreq_open ON pf_requests (item_id, from_loc) WHERE status='open';
+      CREATE TABLE IF NOT EXISTS buy_requests (
+        id         TEXT PRIMARY KEY,
+        item_id    TEXT NOT NULL,
+        name       TEXT NOT NULL,
+        unit       TEXT NOT NULL DEFAULT 'шт.',
+        location   TEXT NOT NULL DEFAULT 'workshop',
+        qty        NUMERIC NOT NULL DEFAULT 0,
+        min        NUMERIC NOT NULL DEFAULT 0,
+        need       NUMERIC NOT NULL DEFAULT 0,
+        status     TEXT NOT NULL DEFAULT 'open',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        closed_at  TIMESTAMPTZ,
+        close_reason TEXT
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_buyreq_open ON buy_requests (item_id, location) WHERE status='open';
       CREATE TABLE IF NOT EXISTS buy_snapshots (
         snap_date DATE NOT NULL,
         item_id   TEXT NOT NULL,
@@ -781,6 +796,62 @@ async function ensureSnapshot() {
   } catch (e) { console.error('ensureSnapshot error:', e.message); }
 }
 
+// Авто-заявка закупщику при падении остатка ниже порога (после списания).
+// Вызывается ВНУТРИ транзакции (client) ПОСЛЕ уменьшения остатка сырья.
+// Порог: qty<min = критично ('crit'), qty<min*1.5 = мало ('low') — оба создают
+// заявку докупить до min*1.5. Upsert: ровно 1 открытая заявка на (item_id, location)
+// через партиал-индекс idx_buyreq_open — параллельные/повторные списания не плодят дубли.
+// Если заявка уже есть открытая — обновляем need/qty актуальными цифрами.
+async function autoBuyRequest(client, it) {
+  try {
+    const min = Number(it.min) || 0;
+    const qty = Number(it.qty) || 0;
+    if (!(min > 0)) return;                       // позиция без минимума — не триггерим
+    if (qty >= min * 1.5) return;                 // остаток не ниже порога — заявки нет
+    const need = Math.round((min * 1.5 - qty) * 100) / 100;
+    if (need <= 0) return;
+    const id = 'buy' + Date.now() + Math.floor(Math.random() * 1000);
+    await client.query(
+      `INSERT INTO buy_requests (id, item_id, name, unit, location, qty, min, need, status)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'open')
+       ON CONFLICT (item_id, location) WHERE status='open'
+       DO UPDATE SET qty=EXCLUDED.qty, min=EXCLUDED.min, need=EXCLUDED.need, created_at=now()`,
+      [id, String(it.id), it.name, it.unit || 'шт.', it.location || 'workshop', qty, min, need]);
+    // ослабление уровня: если была критичная заявка и остаток вернулся в 'low' — уровень уже учтён в qty/min/need
+  } catch (e) { console.error('autoBuyRequest error:', e.message); }
+}
+
+app.get('/buy-requests', requireRole('MANAGER', 'BUYER'), async (req, res) => {
+  try {
+    // страховка: закрыть заявки тех позиций, чей остаток уже >= min*1.5 (не роняет GET)
+    try {
+      await pool.query(
+        `UPDATE buy_requests r SET status='done', closed_at=COALESCE(closed_at, now()), close_reason='fulfilled'
+         WHERE r.status='open' AND EXISTS (
+           SELECT 1 FROM stock s
+           WHERE s.id = r.item_id AND s.location = r.location AND s.min > 0 AND s.qty >= s.min * 1.5
+         )`);
+    } catch (_) {}
+    const st = req.query.status;
+    const { rows } = await pool.query(
+      `SELECT id, item_id, name, unit, location, qty, min, need, status, created_at, closed_at, close_reason
+       FROM buy_requests WHERE ($1::text IS NULL OR status=$1) ORDER BY created_at DESC`,
+      [st || null]);
+    res.json({ ok: true, items: rows });
+  } catch (e) { res.status(500).json({ ok: false, error: String(e) }); }
+});
+
+// закрыть fulfilled-заявки закупки для конкретной позиции/локации внутри транзакции
+async function closeFulfilledBuyRequests(client, itemId, location) {
+  try {
+    await client.query(
+      `UPDATE buy_requests r SET status='done', closed_at=COALESCE(closed_at, now()), close_reason='fulfilled'
+       WHERE r.status='open' AND r.item_id=$1 AND r.location=$2
+         AND EXISTS (SELECT 1 FROM stock s WHERE s.id=$1 AND s.location=$2 AND s.min>0 AND s.qty>=s.min*1.5)`,
+      [String(itemId), location]);
+  } catch (e) { console.error('closeFulfilledBuyRequests error:', e.message); }
+}
+
 app.get('/stock', requireAnyRole, async (req, res) => {
   try {
     const loc = req.query.location;
@@ -857,6 +928,11 @@ app.patch('/stock/:id', requireRole('MANAGER', 'WORKSHOP', 'KITCHEN'), async (re
         return res.status(400).json({ ok: false, error: 'Нужно qty или delta' });
       }
       await client.query('UPDATE stock SET qty=$1, updated_at=now() WHERE id=$2', [it.qty, id]);
+      if (delta < 0) {
+        await autoBuyRequest(client, it);          // списание сырья -> авто-заявка закупщику (upsert, без дублей)
+      } else {
+        await closeFulfilledBuyRequests(client, id, it.location); // приход/пополнение -> закрыть fulfilled
+      }
       const ded = (await client.query(
         `INSERT INTO deductions (ing, qty, unit, reason, emp) VALUES ($1,$2,$3,$4,$5) RETURNING id`,
         [it.name, (delta >= 0 ? '+' : '') + Number(delta.toFixed(4)), it.unit,
@@ -1757,6 +1833,13 @@ async function applyTechCard(tc, items, sign, client) {
         await client.query('UPDATE stock SET qty=GREATEST(0,qty+$1), updated_at=now() WHERE id=$2', [delta, r.ingId]);
         ded.push({ ing: st.name, qty: (sign > 0 ? '-' : '+') + need, unit: r.unit,
           reason: sign > 0 ? 'Автосписание по заказу' : 'Возврат по отмене', emp: 'Система' });
+        if (sign > 0) {
+          // списание по заказу: фактический остаток после зажима 0 -> авто-заявка закупщику
+          const after = (await client.query('SELECT qty FROM stock WHERE id=$1', [r.ingId])).rows[0];
+          if (after) await autoBuyRequest(client, { ...st, qty: after.qty });
+        } else {
+          await closeFulfilledBuyRequests(client, String(r.ingId), st.location);
+        }
       }
     }
   }

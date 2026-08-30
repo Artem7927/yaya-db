@@ -93,6 +93,15 @@ Node >=18, Express ^4.19, pg ^8.11 (Postgres), web-push ^3.6 (VAPID). Корен
 - ensureSnapshot() вызывается fire-and-forget из GET /stock: при первом заходе за день (нет строк за CURRENT_DATE) фиксирует срез дефицита (`qty < min*1.5 AND min>0, need>0`). Идемпотентна. Крона нет — снимок = первый заход дня; нет захода = нет снимка за день. История копится только с деплоя, задним числом не наполняется.
 - GET /buy-snapshots (MANAGER, BUYER): period=day (`?date=YYYY-MM-DD`, дефолт сегодня) / month (`?ym=YYYY-MM`) / year (`?y=YYYY`). month/year — агрегат `MAX(need)` по item_id (пиковая потребность за период).
 - GET /buy-snapshots/dates (MANAGER, BUYER): DISTINCT snap_date.
+- GET /buy-requests (MANAGER, BUYER): открытые авто-заявки закупщику (см. раздел «buy_requests» ниже).
+
+**buy_requests** — авто-заявки закупщику при падении остатка сырья ниже порога (новый канал дефицита, отдельный от /pf-requests к цеху). Колонки: id (TEXT PK), item_id, name, unit, location, qty, min, need, status (open|done, DEFAULT 'open'), created_at, closed_at, close_reason. Партиал-индекс `idx_buyreq_open` на `(item_id, location) WHERE status='open'` — ровно 1 открытая заявка на позицию+локацию (без дублей при повторных списаниях).
+
+- Порог: `qty<min` = критично, `qty<min*1.5` = мало (оба создают заявку); `need=round(min*1.5 − qty)`. Позиции без min (`min=0`) не триггерят.
+- `autoBuyRequest(client, it)` — хелпер, вызывается ВНУТРИ транзакции ПОСЛЕ списания сырья: `PATCH /stock/:id` (ветка delta<0, т.е. cook() кухни и корректировки вниз) и `applyTechCard` (order done — после UPDATE stock с учётом зажима GREATEST(0,...), фактический остаток перечитан). Upsert через `ON CONFLICT (item_id, location) WHERE status='open'` — повторные списания обновляют qty/min/need существующей open-заявки, новые строки не создаются.
+- Обратное закрытие: `closeFulfilledBuyRequests(client, itemId, location)` внутри транзакции при приросте/возврате сырья (ветка delta>=0 в PATCH /stock, sign<0 в applyTechCard): open→done, close_reason='fulfilled', когда `qty>=min*1.5`.
+- GET /buy-requests (MANAGER, BUYER): `?status` фильтр, ORDER BY created_at DESC. СТРАХОВКА (не роняет GET, inner try/catch): перед SELECT — тот же UPDATE open→done для позиций покрытых запасом. Отдаёт id,item_id,name,unit,location,qty,min,need,status,created_at,closed_at,close_reason.
+- Канал закупщика: живой список «Купить» buyer-mobile строится из `/stock` (`qty<min*1.5`) и поллится 15с — после списания (которое и понизило stock) позиция появляется в том же списке автоматически. buy_requests — дублирующий durable-канал для менеджера + страховка истории.
 
 ## 5. Внешние связи — кто обращается к серверу
 Все 4 фронтенда обращаются к ОДНОМУ серверу (один Postgres, один VAPID):
