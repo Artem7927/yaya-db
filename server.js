@@ -467,6 +467,7 @@ async function initDb() {
       ALTER TABLE orders ADD COLUMN IF NOT EXISTS accepted_at TIMESTAMPTZ;
       ALTER TABLE orders ADD COLUMN IF NOT EXISTS deducted    BOOLEAN DEFAULT false;
       ALTER TABLE orders ADD COLUMN IF NOT EXISTS fulfilled   TEXT;
+      ALTER TABLE orders ADD COLUMN IF NOT EXISTS items_status JSONB;
       ALTER TABLE purchases ADD COLUMN IF NOT EXISTS status        TEXT DEFAULT 'accepted';
       ALTER TABLE purchases ADD COLUMN IF NOT EXISTS recv_qty      NUMERIC;
       ALTER TABLE purchases ADD COLUMN IF NOT EXISTS accepted_at   TIMESTAMPTZ;
@@ -1750,7 +1751,7 @@ app.get('/orders', async (req, res) => {
     const { rows } = await pool.query(
       `SELECT id, num, status, data, extract(epoch from created_at)*1000 AS ts,
               extract(epoch from accepted_at)*1000 AS accepted_ts,
-              deducted, fulfilled
+              deducted, fulfilled, items_status
          FROM orders
         WHERE ($1::timestamptz IS NULL OR created_at > $1)
         ORDER BY created_at DESC LIMIT $2`,
@@ -1856,8 +1857,158 @@ function pushStatusLabel(status) {
   return map[status] || 'Статус заказа обновлён';
 }
 
+// ── Разбор заказа в задачи (единый, read-only) ────────────────────────
+// Для каждого блюда заказа строит конкретные задачи готовки: что взять
+// (ПФ/ready-порция из pf_stock «кухня» или сырьё из stock), в каком объёме,
+// и хватает ли. Использует ТУ ЖЕ логику источника, что и applyTechCard,
+// чтобы списание (при закрытии блюда) совпадало с тем, что кухня видит.
+async function orderToTasks(client, ord) {
+  const tc = (await kvGet('yaya_tech_v3', client)) || {};
+  const items = (ord.data && Array.isArray(ord.data.items)) ? ord.data.items : [];
+  const res = [];
+  for (const ci of items) {
+    const dishId = ci && ci.id;
+    const recipe = dishId && tc[dishId];
+    const qty = Number((ci && ci.qty) || 1);
+    if (!recipe) {
+      res.push({
+        dishId, dishName: (ci && ci.name) || String(dishId), qty,
+        noRecipe: true, tasks: []
+      });
+      continue;
+    }
+    const tasks = [];
+    for (const r of recipe) {
+      const need = Number((Number(r.qty) * qty).toFixed(4));
+      if (!(need > 0)) continue;
+      // источник: сначала ПФ/ready из pf_stock «кухня», затем сырьё из stock
+      const pf = (await client.query(
+        `SELECT * FROM pf_stock WHERE id=$1 AND location='kitchen'`, [r.ingId])).rows[0];
+      const isPf = !!pf;
+      const src = isPf
+        ? pf
+        : (await client.query('SELECT * FROM stock WHERE id=$1', [r.ingId])).rows[0];
+      const source = isPf ? 'pf' : 'raw';
+      const avail = src ? Number(src.qty) : 0;
+      const short = Math.max(0, Number((need - avail).toFixed(4)));
+      const enough = short <= 0;
+      tasks.push({
+        ingId: r.ingId,
+        name: src ? src.name : String(r.ingId),
+        unit: r.unit || (src && src.unit) || 'шт.',
+        need,
+        avail,
+        short,
+        enough,
+        source,
+        readyEat: isPf ? (r.ingId.indexOf('ready_') === 0 ? 'ready' : 'pf') : 'raw',
+      });
+    }
+    res.push({ dishId, dishName: (ci && ci.name) || String(dishId), qty, noRecipe: false, tasks });
+  }
+  return res;
+}
+
+// GET /orders/:id/tasks — список задач по заказу (read-only, любая роль)
+app.get('/orders/:id/tasks', requireAnyRole, async (req, res) => {
+  try {
+    const id = req.params.id;
+    const ord = (await pool.query('SELECT * FROM orders WHERE id=$1', [id])).rows[0];
+    if (!ord) return res.status(404).json({ ok: false, error: 'Заказ не найден' });
+    const tasks = await orderToTasks(pool, ord);
+    const dishStatus = ord.items_status && typeof ord.items_status === 'object' ? ord.items_status : {};
+    res.json({ ok: true, tasks, dish_status: dishStatus });
+  } catch (e) { res.status(500).json({ ok: false, error: String(e) }); }
+});
+
+// ── Пометка блюда заказа КУХНЕЙ (по блюдам, не заказ целиком) ────────
+// Кухня НЕ может отменять/править/двигать статус после «готов».
+//   take   → блюдо «в работе» (заказ автоматически переходит в cook, accepted_at)
+//   done   → блюдо «готово» (списывается ЕДИНОЖДЫ по техкарте на первом закрытии);
+//            при закрытии последнего блюда заказ САМ уходит в 'done'.
+async function resolveItemsStatus(items, existing) {
+  existing = existing instanceof Object ? existing : {};
+  const out = {};
+  for (const ci of items || []) {
+    const id = String(ci.id);
+    out[id] = Object.assign({ qty: Number((ci && ci.qty) || 1), status: 'new' }, existing[id] || {});
+  }
+  return out;
+}
+app.post('/orders/:id/item', requireRole('MANAGER', 'SUPERVISOR', 'ASSEMBLER', 'KITCHEN'), async (req, res) => {
+  try {
+    const id = req.params.id;
+    const dishId = String(req.body.dishId || '');
+    const action = String(req.body.action || ''); // 'take' | 'done'
+    if (!['take', 'done'].includes(action)) return res.status(400).json({ ok: false, error: 'action = take|done' });
+    if (!dishId) return res.status(400).json({ ok: false, error: 'Нужен dishId' });
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const ord = (await client.query('SELECT * FROM orders WHERE id=$1 FOR UPDATE', [id])).rows[0];
+      if (!ord) { await client.query('ROLLBACK'); client.release(); return res.status(404).json({ ok: false, error: 'Заказ не найден' }); }
+      if (['done', 'fulfilled', 'cancel'].includes(ord.status)) {
+        await client.query('ROLLBACK'); client.release();
+        return res.status(400).json({ ok: false, error: 'Заказ уже закрыт — кухня больше ничего не делает' });
+      }
+      const items = (ord.data && Array.isArray(ord.data.items)) ? ord.data.items : [];
+      if (!items.some(ci => String(ci.id) === dishId)) {
+        await client.query('ROLLBACK'); client.release();
+        return res.status(404).json({ ok: false, error: 'Блюдо не в заказе' });
+      }
+      let st = resolveItemsStatus(items, ord.items_status);
+      const cur = st[dishId];
+      if (action === 'take') {
+        if (cur.status === 'new') cur.status = 'cook';
+        // на первом взятом блюде заказ -> cook
+        if (ord.status === 'new') {
+          await client.query("UPDATE orders SET status='cook', accepted_at=COALESCE(accepted_at,now()) WHERE id=$1", [id]);
+        }
+      } else { // done
+        if (cur.status === 'done') {
+          await client.query('ROLLBACK'); client.release();
+          return res.json({ ok: true, already: true, dish_status: st, order_status: ord.status });
+        }
+        cur.status = 'done';
+        // списание ЕДИНОЖДЫ: только если заказ ещё не списан
+        if (!ord.deducted) {
+          const tc = (await kvGet('yaya_tech_v3', client)) || {};
+          const single = items.filter(ci => String(ci.id) === dishId);
+          const { ded, shortage } = await applyTechCard(tc, single, 1, client);
+          if (ded.length) await insertDeductions(client, ded);
+          if (shortage && shortage.length) {
+            for (const s of shortage) {
+              await client.query('INSERT INTO deductions (ing, qty, unit, reason, emp) VALUES ($1,$2,$3,$4,$5)',
+                [s.name, '-' + s.short, s.unit, 'НЕДОСТАЧА ПФ в кафе', 'Система']);
+            }
+            console.warn('[deduct] order=' + ord.num + ' dish=' + dishId + ' pf-shortage=' + shortage.map(s => s.id + ' / ' + s.name).join(', '));
+          }
+        }
+        // закрыто последнее блюдо -> заказ сам «готов»
+        const allDone = Object.keys(st).every(k => st[k].status === 'done');
+        if (allDone) {
+          await client.query('UPDATE orders SET status=$1, deducted=true WHERE id=$2', ['done', id]);
+        }
+      }
+      await client.query('UPDATE orders SET items_status=$1 WHERE id=$2', [JSON.stringify(st), id]);
+      await client.query('COMMIT');
+      client.release();
+      // живой статус заказа (после коммита): take->cook, done->cook, последнее блюдо->done
+      const orderStatus = (await pool.query('SELECT status FROM orders WHERE id=$1', [id])).rows[0].status;
+      res.json({ ok: true, dish_status: st, order_status: orderStatus, deducted: ord.deducted || allDone });
+      if (allDone) {
+        try {
+          const num = ord.num;
+          const store = await loadSubs();
+          sendPush((store.orders || {})[String(num)], { title: 'Заказ #' + num, body: 'Заказ готов', tag: 'order-' + num, url: './' });
+        } catch (e2) {}
+      }
+    } catch (e) { await client.query('ROLLBACK'); client.release(); throw e; }
+  } catch (e) { res.status(500).json({ ok: false, error: String(e) }); }
+});
+
 // POST /orders/:id/status { status } — жизненный цикл заказа
-app.post('/orders/:id/status', requireRole('MANAGER', 'SUPERVISOR', 'ASSEMBLER', 'KITCHEN'), async (req, res) => {
+app.post('/orders/:id/status', requireRole('MANAGER', 'SUPERVISOR', 'ASSEMBLER'), async (req, res) => {
   try {
     const id = req.params.id;
     const status = String(req.body.status || '');
@@ -1875,8 +2026,11 @@ app.post('/orders/:id/status', requireRole('MANAGER', 'SUPERVISOR', 'ASSEMBLER',
       } else if (status === 'done') {
         if (!ord.deducted) {
           const tc = (await kvGet('yaya_tech_v3', client)) || {};
-          const { ded, missing, shortage } = await applyTechCard(tc, (ord.data && ord.data.items) || [], 1, client);
-          await insertDeductions(client, ded);
+          // списываем только блюда, которые кухня ЕЩЁ не закрыла (/item done); уже списанные пропускаем
+          const already = resolveItemsStatus((ord.data && ord.data.items) || [], ord.items_status);
+          const open = ((ord.data && ord.data.items) || []).filter(ci => (already[String(ci.id)] || {}).status !== 'done');
+          const { ded, missing, shortage } = await applyTechCard(tc, open, 1, client);
+          if (ded.length) await insertDeductions(client, ded);
           if (shortage && shortage.length) {
             respShortage = shortage;
             for (const s of shortage) {
