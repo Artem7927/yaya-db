@@ -1863,6 +1863,7 @@ function pushStatusLabel(status) {
 // и хватает ли. Использует ТУ ЖЕ логику источника, что и applyTechCard,
 // чтобы списание (при закрытии блюда) совпадало с тем, что кухня видит.
 async function orderToTasks(client, ord) {
+  ord = normOrdData(ord);
   const tc = (await kvGet('yaya_tech_v3', client)) || {};
   const items = (ord.data && Array.isArray(ord.data.items)) ? ord.data.items : [];
   const res = [];
@@ -1935,6 +1936,12 @@ async function resolveItemsStatus(items, existing) {
   }
   return out;
 }
+function normOrdData(ord) {
+  if (ord && typeof ord.data === 'string') {
+    try { ord.data = JSON.parse(ord.data); } catch (e) { ord.data = null; }
+  }
+  return ord;
+}
 app.post('/orders/:id/item', requireRole('MANAGER', 'SUPERVISOR', 'ASSEMBLER', 'KITCHEN'), async (req, res) => {
   try {
     const id = req.params.id;
@@ -1945,7 +1952,7 @@ app.post('/orders/:id/item', requireRole('MANAGER', 'SUPERVISOR', 'ASSEMBLER', '
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
-      const ord = (await client.query('SELECT * FROM orders WHERE id=$1 FOR UPDATE', [id])).rows[0];
+      const ord = normOrdData((await client.query('SELECT * FROM orders WHERE id=$1 FOR UPDATE', [id])).rows[0]);
       if (!ord) { await client.query('ROLLBACK'); client.release(); return res.status(404).json({ ok: false, error: 'Заказ не найден' }); }
       if (['done', 'fulfilled', 'cancel'].includes(ord.status)) {
         await client.query('ROLLBACK'); client.release();
@@ -2031,7 +2038,7 @@ app.post('/orders/:id/status', requireRole('MANAGER', 'SUPERVISOR', 'ASSEMBLER')
     try {
       await client.query('BEGIN');
       let respShortage = null;
-      const ord = (await client.query('SELECT * FROM orders WHERE id=$1 FOR UPDATE', [id])).rows[0];
+      const ord = normOrdData((await client.query('SELECT * FROM orders WHERE id=$1 FOR UPDATE', [id])).rows[0]);
       if (!ord) { await client.query('ROLLBACK'); client.release(); return res.status(404).json({ ok: false, error: 'Заказ не найден' }); }
       if (status === 'cook') {
         await client.query('UPDATE orders SET status=$1, accepted_at=COALESCE(accepted_at,now()) WHERE id=$2', ['cook', id]);
