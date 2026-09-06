@@ -1927,7 +1927,7 @@ app.get('/orders/:id/tasks', requireAnyRole, async (req, res) => {
 //   take   → блюдо «в работе» (заказ автоматически переходит в cook, accepted_at)
 //   done   → блюдо «готово» (списывается ЕДИНОЖДЫ по техкарте на первом закрытии);
 //            при закрытии последнего блюда заказ САМ уходит в 'done'.
-async function resolveItemsStatus(items, existing) {
+function resolveItemsStatus(items, existing) {
   existing = existing instanceof Object ? existing : {};
   const out = {};
   for (const ci of items || []) {
