@@ -1958,6 +1958,11 @@ app.post('/orders/:id/item', requireRole('MANAGER', 'SUPERVISOR', 'ASSEMBLER', '
       }
       let st = resolveItemsStatus(items, ord.items_status);
       const cur = st[dishId];
+      if (!cur) {
+        await client.query('ROLLBACK'); client.release();
+        return res.status(400).json({ ok: false, error: 'Статус блюда не найден в заказе' });
+      }
+      let allDone = false;
       if (action === 'take') {
         if (cur.status === 'new') cur.status = 'cook';
         // на первом взятом блюде заказ -> cook
@@ -1985,7 +1990,7 @@ app.post('/orders/:id/item', requireRole('MANAGER', 'SUPERVISOR', 'ASSEMBLER', '
           }
         }
         // закрыто последнее блюдо -> заказ сам «готов»
-        const allDone = Object.keys(st).every(k => st[k].status === 'done');
+        allDone = Object.keys(st).every(k => st[k].status === 'done');
         if (allDone) {
           await client.query('UPDATE orders SET status=$1, deducted=true WHERE id=$2', ['done', id]);
         }
