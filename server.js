@@ -1938,7 +1938,7 @@ async function resolveItemsStatus(items, existing) {
 app.post('/orders/:id/item', requireRole('MANAGER', 'SUPERVISOR', 'ASSEMBLER', 'KITCHEN'), async (req, res) => {
   try {
     const id = req.params.id;
-    const dishId = String(req.body.dishId || '');
+    let dishId = String(req.body.dishId || '');
     const action = String(req.body.action || ''); // 'take' | 'done'
     if (!['take', 'done'].includes(action)) return res.status(400).json({ ok: false, error: 'action = take|done' });
     if (!dishId) return res.status(400).json({ ok: false, error: 'Нужен dishId' });
@@ -1952,16 +1952,23 @@ app.post('/orders/:id/item', requireRole('MANAGER', 'SUPERVISOR', 'ASSEMBLER', '
         return res.status(400).json({ ok: false, error: 'Заказ уже закрыт — кухня больше ничего не делает' });
       }
       const items = (ord.data && Array.isArray(ord.data.items)) ? ord.data.items : [];
-      if (!items.some(ci => String(ci.id) === dishId)) {
-        await client.query('ROLLBACK'); client.release();
-        return res.status(404).json({ ok: false, error: 'Блюдо не в заказе' });
-      }
       let st = resolveItemsStatus(items, ord.items_status);
-      const cur = st[dishId];
+      // если items_status в заказе пустой — инициализируем из состава и СОХРАНЯЕМ до обработки действия
+      if (!(ord.items_status instanceof Object && Object.keys(ord.items_status).length)) {
+        st = resolveItemsStatus(items, null);
+        await client.query('UPDATE orders SET items_status=$1 WHERE id=$2', [JSON.stringify(st), id]);
+      }
+      const stKeys = Object.keys(st);
+      console.log('[item] order=' + ord.num + ' id=' + id + ' dishId=' + JSON.stringify(dishId) + ' stKeys=' + JSON.stringify(stKeys));
+      // нормализация dishId: trim + регистро-независимое сравнение с ключами st
+      const want = String(dishId || '').trim().toLowerCase();
+      const foundKey = stKeys.find(k => String(k).trim().toLowerCase() === want) || null;
+      const cur = foundKey ? st[foundKey] : undefined;
       if (!cur) {
         await client.query('ROLLBACK'); client.release();
-        return res.status(400).json({ ok: false, error: 'Статус блюда не найден в заказе' });
+        return res.status(400).json({ ok: false, error: 'Статус блюда не найден в заказе (dishId=' + dishId + ', доступно: ' + stKeys.join(', ') + ')' });
       }
+      dishId = foundKey;
       let allDone = false;
       if (action === 'take') {
         if (cur.status === 'new') cur.status = 'cook';
