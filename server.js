@@ -1966,7 +1966,7 @@ app.post('/orders/:id/item', requireRole('MANAGER', 'SUPERVISOR', 'ASSEMBLER', '
         await client.query('UPDATE orders SET items_status=$1 WHERE id=$2', [JSON.stringify(st), id]);
       }
       const stKeys = Object.keys(st);
-      console.log('[item] order=' + ord.num + ' id=' + id + ' dishId=' + JSON.stringify(dishId) + ' stKeys=' + JSON.stringify(stKeys) + ' dataType=' + typeof ord.data + ' itemsIsArray=' + Array.isArray(ord.data && ord.data.items) + ' dataKeys=' + (ord.data ? JSON.stringify(Object.keys(ord.data)) : 'null'));
+      console.log('[item] order=' + ord.num + ' id=' + id + ' dishId=' + JSON.stringify(dishId) + ' stKeys=' + JSON.stringify(stKeys) + ' dataType=' + typeof ord.data + ' itemsIsArray=' + Array.isArray(ord.data && ord.data.items) + ' dataKeys=' + (ord.data ? JSON.stringify(Object.keys(ord.data)) : 'null') + ' itemsLen=' + ((ord.data && ord.data.items || '').length || 0) + ' itemsRaw=' + JSON.stringify((ord.data && ord.data.items != null) ? ord.data.items : null).slice(0, 300));
       // нормализация dishId: trim + регистро-независимое сравнение с ключами st
       const want = String(dishId || '').trim().toLowerCase();
       const foundKey = stKeys.find(k => String(k).trim().toLowerCase() === want) || null;
