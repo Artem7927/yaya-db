@@ -2027,12 +2027,17 @@ app.post('/orders/:id/item', requireRole('MANAGER', 'SUPERVISOR', 'ASSEMBLER', '
 });
 
 // POST /orders/:id/status { status } — жизненный цикл заказа
-app.post('/orders/:id/status', requireRole('MANAGER', 'SUPERVISOR', 'ASSEMBLER'), async (req, res) => {
+// Кухня тоже может (кнопки «Взял»/«Готово» на весь заказ), но НЕ может cancel и
+// ничего не делает после «готов» — отражает договорённости (как в /orders/:id/item).
+app.post('/orders/:id/status', requireRole('MANAGER', 'SUPERVISOR', 'ASSEMBLER', 'KITCHEN'), async (req, res) => {
   try {
     const id = req.params.id;
     const status = String(req.body.status || '');
     if (!['cook', 'done', 'cancel'].includes(status)) {
       return res.status(400).json({ ok: false, error: 'Недопустимый статус' });
+    }
+    if (req.role === 'KITCHEN' && status === 'cancel') {
+      return res.status(403).json({ ok: false, error: 'Кухня не может отменять заказ' });
     }
     const client = await pool.connect();
     try {
@@ -2040,6 +2045,10 @@ app.post('/orders/:id/status', requireRole('MANAGER', 'SUPERVISOR', 'ASSEMBLER')
       let respShortage = null;
       const ord = normOrdData((await client.query('SELECT * FROM orders WHERE id=$1 FOR UPDATE', [id])).rows[0]);
       if (!ord) { await client.query('ROLLBACK'); client.release(); return res.status(404).json({ ok: false, error: 'Заказ не найден' }); }
+      if (req.role === 'KITCHEN' && ['done', 'fulfilled', 'cancel'].includes(ord.status)) {
+        await client.query('ROLLBACK'); client.release();
+        return res.status(400).json({ ok: false, error: 'Заказ уже закрыт — кухня больше ничего не делает' });
+      }
       if (status === 'cook') {
         await client.query('UPDATE orders SET status=$1, accepted_at=COALESCE(accepted_at,now()) WHERE id=$2', ['cook', id]);
       } else if (status === 'done') {
