@@ -77,6 +77,9 @@ async function sendPushRole(role, payload) {
     if (bucket && bucket.length) await sendPush(bucket, payload);
   } catch (e) {}
 }
+function normCourierName(name) {
+  return String(name == null ? '' : name).trim().toLowerCase().replace(/ё/g, 'е').replace(/\s+/g, ' ');
+}
 const DST_PUSH = { on_way: 'Курьер в пути', delivered: 'Заказ доставлен' };
 async function notifyDeliveryChanges(prev, next) {
   try {
@@ -96,6 +99,32 @@ async function notifyDeliveryChanges(prev, next) {
         if (!num) continue;
         sendPush((store.orders || {})[String(num)], {
           title: 'Заказ #' + num, body: DST_PUSH[ch.ds], tag: 'order-' + num, url: './'
+        });
+      } catch (e) {}
+    }
+  } catch (e) {}
+}
+async function notifyCourierAssigned(prev, next) {
+  try {
+    prev = prev || {}; next = next || {};
+    const changed = [];
+    for (const id in next) {
+      const nC = next[id] && next[id].courier;
+      const oC = prev[id] && prev[id].courier;
+      const nn = normCourierName(nC), oo = normCourierName(oC);
+      if (nn && nn !== oo) changed.push({ id, courier: nn });
+    }
+    if (!changed.length) return;
+    const store = await loadSubs();
+    for (const ch of changed) {
+      try {
+        const q = await pool.query('SELECT num FROM orders WHERE id=$1', [ch.id]);
+        const num = q.rows[0] && q.rows[0].num;
+        if (!num) continue;
+        sendPush((store.couriers || {})[ch.courier], {
+          title: 'Новый заказ на доставку',
+          body: 'Заказ #' + num + ' назначен на вас',
+          tag: 'assign', url: './'
         });
       } catch (e) {}
     }
@@ -609,6 +638,7 @@ app.put('/kv/:key', async (req, res, next) => {
     res.json({ ok: true, rev: revOf(rows[0].updated_at) });
     if (req.params.key === 'yaya_order_couriers') {
       notifyDeliveryChanges(prevCour, req.body).catch(() => {});
+      notifyCourierAssigned(prevCour, req.body).catch(() => {});
     }
   } catch (e) { res.status(500).json({ ok: false, error: String(e) }); }
 });
@@ -2182,7 +2212,7 @@ app.post('/push/subscribe', async (req, res) => {
     if (role === 'admin') {
       store.admin = dedupeSubs([...(store.admin || []), sub]);
     } else if (role === 'courier' && name) {
-      const key = String(name).trim().toLowerCase();
+      const key = normCourierName(name);
       store.couriers = store.couriers || {};
       store.couriers[key] = dedupeSubs([...(store.couriers[key] || []), sub]);
     } else if (role === 'workshop' || role === 'kitchen' || role === 'buyer') {
@@ -2204,7 +2234,7 @@ app.post('/push/notify-courier', requireRole('MANAGER'), async (req, res) => {
     const { name, num } = req.body || {};
     if (!name) return res.status(400).json({ ok: false });
     const store = await loadSubs();
-    const key = String(name).trim().toLowerCase();
+    const key = normCourierName(name);
     sendPush((store.couriers || {})[key], {
       title: 'Новый заказ на доставку',
       body: num ? ('Заказ #' + num + ' назначен на вас') : 'Вам назначен заказ',
