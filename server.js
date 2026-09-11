@@ -2134,15 +2134,27 @@ app.post('/orders/:id/status', requireRole('MANAGER', 'SUPERVISOR', 'ASSEMBLER',
 });
 
 // POST /orders/:id/fulfill { mode:'cafe'|'pickup'|'courier' }
-app.post('/orders/:id/fulfill', requireRole('MANAGER', 'SUPERVISOR', 'ASSEMBLER'), async (req, res) => {
+app.post('/orders/:id/fulfill', requireRole('MANAGER', 'SUPERVISOR', 'ASSEMBLER', 'COURIER'), async (req, res) => {
   try {
     const id = req.params.id;
     const mode = String(req.body.mode || '');
     if (!['cafe', 'pickup', 'courier'].includes(mode)) {
       return res.status(400).json({ ok: false, error: 'Недопустимый mode' });
     }
+    if (req.role === 'COURIER' && mode !== 'courier') {
+      return res.status(403).json({ ok: false, error: 'Курьер может отметить только доставку (mode=courier)' });
+    }
     const ord = (await pool.query('SELECT * FROM orders WHERE id=$1', [id])).rows[0];
     if (!ord) return res.status(404).json({ ok: false, error: 'Заказ не найден' });
+    if (ord.status === 'cancel') return res.status(400).json({ ok: false, error: 'Отменённый заказ нельзя выдать' });
+    if (ord.status === 'fulfilled') return res.json({ ok: true, already: true });
+    if (ord.status !== 'done') return res.status(400).json({ ok: false, error: 'Заказ ещё не готов — сначала нужен статус done' });
+    if (req.role === 'COURIER') {
+      const cur = (await kvGet('yaya_order_couriers')) || {};
+      if (((cur[String(ord.id)] || {}).delivery_status) !== 'delivered') {
+        return res.status(400).json({ ok: false, error: 'Сначала отметь заказ доставленным в курьерском приложении' });
+      }
+    }
     if (mode === 'courier') {
       const cur = (await kvGet('yaya_order_couriers')) || {};
       const prev = JSON.parse(JSON.stringify(cur));
