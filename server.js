@@ -561,6 +561,10 @@ async function initDb() {
       ALTER TABLE purchases ADD COLUMN IF NOT EXISTS performer   TEXT;
       ALTER TABLE pf_requests ADD COLUMN IF NOT EXISTS closed_at       TIMESTAMPTZ;
       ALTER TABLE pf_requests ADD COLUMN IF NOT EXISTS close_reason    TEXT;
+      ALTER TABLE deductions ADD COLUMN IF NOT EXISTS location TEXT;
+      UPDATE deductions SET location = CASE WHEN emp='Кухня' THEN 'kitchen'
+        WHEN emp='Цех' THEN 'workshop' END
+        WHERE location IS NULL AND emp IN ('Кухня','Цех');
     `);
     await migrateSchema(client);
     await seedIfEmpty(client);
@@ -965,9 +969,9 @@ app.patch('/stock/:id', requireRole('MANAGER', 'WORKSHOP', 'KITCHEN'), async (re
         await closeFulfilledBuyRequests(client, id, it.location); // приход/пополнение -> закрыть fulfilled
       }
       const ded = (await client.query(
-        `INSERT INTO deductions (ing, qty, unit, reason, emp) VALUES ($1,$2,$3,$4,$5) RETURNING id`,
+        `INSERT INTO deductions (ing, qty, unit, reason, emp, location) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id`,
         [it.name, (delta >= 0 ? '+' : '') + Number(delta.toFixed(4)), it.unit,
-         body.reason || 'Корректировка', body.emp || req.role])).rows[0];
+         body.reason || 'Корректировка', body.emp || req.role, it.location])).rows[0];
       const media = Array.isArray(body.media) ? body.media.slice(0, 5) : [];
       for (const m of media) {
         if (!m || typeof m.url !== 'string') continue;
@@ -1355,7 +1359,7 @@ app.post('/deductions', requireAnyRole, async (req, res) => {
 app.get('/deductions', requireAnyRole, async (req, res) => {
   try {
     const { rows } = await pool.query(
-      `SELECT d.id, d.ts, d.ing, d.qty, d.unit, d.reason, d.emp,
+      `SELECT d.id, d.ts, d.ing, d.qty, d.unit, d.reason, d.emp, d.location,
               EXISTS(SELECT 1 FROM deduction_media m WHERE m.deduction_id = d.id) AS has_media
        FROM deductions d ORDER BY d.ts DESC LIMIT 3000`);
     res.json({ ok: true, items: rows.map(r => ({ ...r, ts: Number(r.ts), has_media: !!r.has_media })) });
