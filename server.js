@@ -1374,6 +1374,33 @@ app.get('/deductions/:id/media', requireAnyRole, async (req, res) => {
   } catch (e) { res.status(500).json({ ok: false, error: String(e) }); }
 });
 
+// DELETE /deductions/null-cleanup — удаление записей списаний с location IS NULL (только MANAGER)
+// Строго location IS NULL; записи с непустым location не трогает. Каскадно чистит deduction_media.
+// Без подтверждения (confirm=1 / confirm=true в query или body) — предпросмотр, без удаления.
+app.delete('/deductions/null-cleanup', requireRole('MANAGER'), limit(3, 60000), async (req, res) => {
+  try {
+    const cq = String(req.query.confirm || '');
+    const cb = (req.body || {}).confirm;
+    const confirm = cq === '1' || cq === 'true' || cb === true || cb === 1 || cb === '1';
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const before = (await client.query('SELECT count(*)::int AS n FROM deductions')).rows[0].n;
+      const would = (await client.query('SELECT count(*)::int AS n FROM deductions WHERE location IS NULL')).rows[0].n;
+      if (!confirm) {
+        await client.query('ROLLBACK');
+        client.release();
+        return res.json({ ok: true, dry_run: true, would_delete: would, total_before: before });
+      }
+      const del = await client.query('DELETE FROM deductions WHERE location IS NULL');
+      const after = (await client.query('SELECT count(*)::int AS n FROM deductions')).rows[0].n;
+      await client.query('COMMIT');
+      client.release();
+      res.json({ ok: true, deleted: del.rowCount, total_before: before, total_after: after });
+    } catch (e) { await client.query('ROLLBACK'); client.release(); throw e; }
+  } catch (e) { res.status(500).json({ ok: false, error: String(e) }); }
+});
+
 app.post('/transfers', requireRole('MANAGER', 'WORKSHOP', 'KITCHEN'), async (req, res) => {
   try {
     const b = req.body || {};
