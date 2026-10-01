@@ -4,6 +4,7 @@
 
 ## 1. Назначение репо
 Единый бэкенд и API для всех клиентов YaYa Chicken — Node/Express + Postgres (Railway) — общее хранилище для системы учёта и заказов витрины (package.json). URL: https://yaya-db-production.up.railway.app.
+yaya-db: автодеплой Railway с push в main — push = прод сразу. diff + node --check ДО push обязательны.
 
 ## 2. Стек и точка входа
 Node >=18, Express ^4.19, pg ^8.11 (Postgres), web-push ^3.6 (VAPID). Корень/точка входа — server.js (`npm start`, PORT env или 3000); server.js сам создаёт схему БД и стартует только после initDb. seed.js — только данные для сида пустых таблиц. Роутов/README нет.
