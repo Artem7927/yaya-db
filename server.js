@@ -1237,26 +1237,34 @@ async function refreshClosingSafetyNet() {
 }
 
 // PATCH /pf-stock/:id — установить точный остаток ПФ (Пересчёт)
-// body: { qty }
+// body: { qty, location } — location ОБЯЗАТЕЛЕН ('kitchen'|'workshop'): pf_stock имеет
+// составной PK (id, location), и без локации UPDATE затирал бы ОБЕ строки позиции.
 app.patch('/pf-stock/:id', requireRole('MANAGER', 'WORKSHOP', 'KITCHEN'), async (req, res) => {
   try {
     const id = req.params.id;
     const b = req.body || {};
-    const newQty = Number(b.qty);
+    const loc = b.location;
+    if (loc !== 'kitchen' && loc !== 'workshop') return res.status(400).json({ ok: false, error: 'location required' });
+    if (!stockAccess(req.role, { location: loc })) return res.status(403).json({ ok: false, error: 'Нет доступа к этому складу' });
+    const newQty = Math.round(Number(b.qty) * 1000) / 1000;
     if (!Number.isFinite(newQty) || newQty < 0) return res.status(400).json({ ok: false, error: 'Нужно qty >= 0' });
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
-      const it = (await client.query('SELECT * FROM pf_stock WHERE id=$1 FOR UPDATE', [id])).rows[0];
+      const it = (await client.query('SELECT * FROM pf_stock WHERE id=$1 AND location=$2 FOR UPDATE', [id, loc])).rows[0];
       if (!it) { await client.query('ROLLBACK'); client.release(); return res.status(404).json({ ok: false, error: 'Позиция не найдена' }); }
+      if (String(it.unit || '').indexOf('шт') === 0 && newQty !== Math.round(newQty)) {
+        await client.query('ROLLBACK'); client.release();
+        return res.status(400).json({ ok: false, error: 'Для штук — целое число' });
+      }
       const delta = newQty - Number(it.qty);
-      await client.query('UPDATE pf_stock SET qty=$1, updated_at=now() WHERE id=$2', [newQty, id]);
-      await closeFulfilledPfRequests(client, id, 'kitchen');
+      await client.query('UPDATE pf_stock SET qty=$1, updated_at=now() WHERE id=$2 AND location=$3', [newQty, id, loc]);
+      await closeFulfilledPfRequests(client, id, loc);
       await client.query('INSERT INTO deductions (ing, qty, unit, reason, emp) VALUES ($1,$2,$3,$4,$5)',
         [it.name, (delta >= 0 ? '+' : '') + Number(delta.toFixed(4)), it.unit, 'Инвентаризация ПФ', b.emp || req.role]);
       await client.query('COMMIT');
       client.release();
-      res.json({ ok: true, item: { id: it.id, name: it.name, qty: newQty, unit: it.unit, min: rowToNum(it.min) } });
+      res.json({ ok: true, item: { id: it.id, name: it.name, qty: newQty, unit: it.unit, min: rowToNum(it.min), location: loc } });
     } catch (e) { await client.query('ROLLBACK'); client.release(); throw e; }
   } catch (e) { res.status(500).json({ ok: false, error: String(e) }); }
 });
