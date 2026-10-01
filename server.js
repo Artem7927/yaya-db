@@ -1260,8 +1260,9 @@ app.patch('/pf-stock/:id', requireRole('MANAGER', 'WORKSHOP', 'KITCHEN'), async 
       const delta = newQty - Number(it.qty);
       await client.query('UPDATE pf_stock SET qty=$1, updated_at=now() WHERE id=$2 AND location=$3', [newQty, id, loc]);
       await closeFulfilledPfRequests(client, id, loc);
-      await client.query('INSERT INTO deductions (ing, qty, unit, reason, emp) VALUES ($1,$2,$3,$4,$5)',
-        [it.name, (delta >= 0 ? '+' : '') + Number(delta.toFixed(4)), it.unit, 'Инвентаризация ПФ', b.emp || req.role]);
+      const rs=(typeof b.reason==='string'&&b.reason.trim())?b.reason.trim().slice(0,200):'Инвентаризация ПФ';
+      await client.query('INSERT INTO deductions (ing, qty, unit, reason, emp, location) VALUES ($1,$2,$3,$4,$5,$6)',
+        [it.name, (delta >= 0 ? '+' : '') + Number(delta.toFixed(4)), it.unit, rs, b.emp || req.role, loc]);
       await client.query('COMMIT');
       client.release();
       res.json({ ok: true, item: { id: it.id, name: it.name, qty: newQty, unit: it.unit, min: rowToNum(it.min), location: loc } });
